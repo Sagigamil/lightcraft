@@ -115,7 +115,9 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
     let shown = egui::Window::new(crate::i18n::tr(&title)).id(window_id)
         .collapsible(false)
         .resizable(import)
-        .vscroll(import)
+        .vscroll(import || cfg!(target_os = "android"))
+        .max_height(if cfg!(target_os = "android") { (screen.height() - 120.0).max(40.0) } else { f32::INFINITY })
+        .max_width(if cfg!(target_os = "android") { (screen.width() - 64.0).max(40.0) } else { f32::INFINITY })
         .resize(|r| if import { r.default_height(crate::import::DIALOG_SIZE[1]) } else { r })
         .frame(frame)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -673,9 +675,9 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                     field(ui, "Folder", |ui| {
                         trailing_button_row(ui, |ui| {
-                            if app.services.pick_folder.is_some()
+                            if (app.services.pick_export_folder.is_some() || app.services.pick_folder.is_some())
                                 && crate::widgets::text_button(ui, "exportChooseFolder", crate::i18n::tr("Choose…"), false).clicked()
-                                && let Some(pick) = app.services.pick_folder.as_mut()
+                                && let Some(pick) = app.services.pick_export_folder.as_mut().or(app.services.pick_folder.as_mut())
                                 && let Some(d) = pick()
                             {
                                 *dir = d;
@@ -780,50 +782,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         }
                     }
                 }
-                Dialog::Shortcuts => {
-                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                        egui::Grid::new("shortcuts").striped(true).show(ui, |ui| {
-                            for (id, label, sc, _) in crate::menus::ui_commands() {
-                                if let Some(sc) = sc {
-                                    let grid_pick = *id == "panel.presets" && crate::shortcuts::library_grid(app);
-                                    ui.label(crate::i18n::tr(if grid_pick { "Flag as Pick" } else { label }));
-                                    ui.label(*sc);
-                                    ui.label(egui::RichText::new(if grid_pick { "photo.flag" } else { id }).color(t.text_dim));
-                                    ui.end_row();
-                                }
-                            }
-                            for sc in ["0–5", "Shift+0–5"] {
-                                ui.label(crate::i18n::tr("Set Rating"));
-                                ui.label(sc);
-                                ui.label(egui::RichText::new("photo.rate").color(t.text_dim));
-                                ui.end_row();
-                            }
-                            ui.label(crate::i18n::tr("Set Color Label"));
-                            ui.label("6–9");
-                            ui.label(egui::RichText::new("photo.label").color(t.text_dim));
-                            ui.end_row();
-                            for c in lightcraft_engine::command_specs() {
-                                if let Some(sc) = c.shortcut {
-                                    ui.label(crate::i18n::tr(c.label));
-                                    ui.label(sc);
-                                    ui.label(egui::RichText::new(c.id).color(t.text_dim));
-                                    ui.end_row();
-                                }
-                            }
-                            for (sc, id, _) in crate::shortcuts::ALIASES {
-                                let label = crate::menus::ui_commands()
-                                    .find(|c| c.0 == *id)
-                                    .map(|c| c.1)
-                                    .or_else(|| lightcraft_engine::find_command(id).map(|c| c.label))
-                                    .unwrap_or(id);
-                                ui.label(crate::i18n::tr(label));
-                                ui.label(*sc);
-                                ui.label(egui::RichText::new(*id).color(t.text_dim));
-                                ui.end_row();
-                            }
-                        });
-                    });
-                }
+                Dialog::Shortcuts => crate::panels::keymap::body(app, ui, &t),
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -882,6 +841,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         ctx.move_to_top(w.response.layer_id);
         crate::widgets::register(ctx, "dialog:window", w.response.rect);
     }
+    // (while the shortcuts editor records a key, it takes Esc itself to cancel)
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         close = true;
     }
