@@ -26,18 +26,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Java ${{ env.JAVA_VERSION }}
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: microsoft
           java-version: ${{ env.JAVA_VERSION }}
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android NDK
         run: |
-          sdkmanager --install "ndk;$ANDROID_NDK_VERSION" --sdk_root="$ANDROID_HOME"
+          mkdir -p android-sdk/cmdline-tools
+          cd android-sdk/cmdline-tools
+          curl -sS https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o cmdline-tools.zip
+          unzip -q cmdline-tools.zip
+          mv cmdline-tools latest
+          rm cmdline-tools.zip
+          yes | latest/bin/sdkmanager --licenses --sdk_root="$GITHUB_WORKSPACE/android-sdk" || true
+          latest/bin/sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;$ANDROID_NDK_VERSION" --sdk_root="$GITHUB_WORKSPACE/android-sdk"
+        env:
+          ANDROID_NDK_VERSION: ${{ env.ANDROID_NDK_VERSION }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -50,7 +56,6 @@ jobs:
       - name: Build Rust library
         env:
           ANDROID_HOME: ${{ github.workspace }}/android-sdk
-          JAVA_HOME: /usr/lib/jvm/msft-jdk-17.0.21.21-hotspot
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           target=aarch64-linux-android
@@ -75,7 +80,6 @@ jobs:
       - name: Build APK
         env:
           ANDROID_HOME: ${{ github.workspace }}/android-sdk
-          JAVA_HOME: /usr/lib/jvm/msft-jdk-17.0.21.21-hotspot
         run: |
           cd android
           chmod +x gradlew
