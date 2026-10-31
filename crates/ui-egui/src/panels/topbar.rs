@@ -69,13 +69,28 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 egui::TextEdit::singleline(&mut app.ui.search)
                     .id(id)
                     .frame(egui::Frame::NONE)
-                    .desired_width(sr.width() - 20.0)
+                    .desired_width(sr.width() - 36.0)
                     .font(t.font(13.5))
                     .text_color(t.text),
             );
             if resp.changed() {
                 let q = app.ui.search.clone();
                 let _ = app.run("library.filter", json!({"text": q}));
+            }
+            // clear button: × on the right side of the search field
+            if !app.ui.search.is_empty() {
+                let cr = Rect::from_center_size(pos2(sr.right() - 10.0, sr.center().y), vec2(20.0, 20.0));
+                let cresp = ui.interact(cr, egui::Id::new("search-clear"), Sense::click());
+                paint(
+                    ui.painter(),
+                    cr.shrink(4.0),
+                    Icon::Close,
+                    if cresp.hovered() { t.text } else { t.icon },
+                );
+                if cresp.clicked() {
+                    app.ui.search.clear();
+                    let _ = app.run("library.filter", json!({"text": ""}));
+                }
             }
             // filter icon right of the search field
             let fr = Rect::from_center_size(pos2(sr.right() + 22.0, sr.center().y), vec2(28.0, 28.0));
