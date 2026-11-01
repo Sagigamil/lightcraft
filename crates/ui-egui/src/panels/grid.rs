@@ -170,6 +170,39 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         super::filterbar::show(app, ui);
     }
     app.canvas_rect = Some(ui.max_rect());
+    let full = ui.max_rect();
+    handle_pinch_zoom(app, ui, full);
+    // global tap-vs-scroll: intercept press before ScrollArea claims it.
+    // Track which cell (if any) received the pointer press. On release, if the
+    // pointer is still over the same cell and barely moved, it's a tap -> select.
+    let press_key = egui::Id::new("grid-press");
+    let multi_key = egui::Id::new("grid-multi");
+    let touch_key = egui::Id::new("grid-touch-input");
+    let pointer_pressed = ui.input(|i| i.pointer.any_pressed());
+    let pointer_released = ui.input(|i| i.pointer.any_released());
+    let frame_touch = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Touch { .. })));
+    let multi_touch = ui.input(|i| i.multi_touch().is_some());
+    if pointer_pressed {
+        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+            ui.ctx().data_mut(|d| d.insert_temp(press_key, [pos.x, pos.y]));
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(multi_key, false));
+    }
+    if multi_touch {
+        ui.ctx().data_mut(|d| d.insert_temp(multi_key, true));
+    }
+    if frame_touch {
+        ui.ctx().data_mut(|d| d.insert_temp(touch_key, true));
+    }
+    let press_origin: Option<[f32; 2]> = ui.ctx().data(|d| d.get_temp(press_key));
+    let was_released = pointer_released;
+    let multi_was_active: bool = ui.ctx().data(|d| d.get_temp(multi_key)).unwrap_or(false);
+    let is_touch = frame_touch || ui.ctx().data(|d| d.get_temp::<bool>(touch_key)).unwrap_or(false);
+    if was_released {
+        ui.ctx().data_mut(|d| d.remove::<[f32; 2]>(press_key));
+        ui.ctx().data_mut(|d| d.remove::<bool>(multi_key));
+        ui.ctx().data_mut(|d| d.remove::<bool>(touch_key));
+    }
     if ids.is_empty() {
         if !chips.is_empty() {
             let body = match total {
@@ -236,6 +269,49 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), total_h), Sense::hover());
         let origin = area.min;
         app.grid_scroll = Some(viewport.top());
+        // deferred tap detection: needs the scroll origin to map cell rects to screen space.
+        // On touch release egui-winit sends `PointerGone`, so `latest_pos` is already None;
+        // `interact_pos` still holds the release position.
+        if was_released && !multi_was_active {
+            let release_pos = ui.input(|i| i.pointer.interact_pos());
+            let drag_dist_sq = press_origin.and_then(|o| release_pos.map(|p| (p.x - o[0]).powi(2) + (p.y - o[1]).powi(2)));
+            let threshold = 6.0_f32.powi(2);
+            let is_tap = !drag_dist_sq.is_some_and(|d| d > threshold);
+            if let (true, Some(press_pos), Some(release_pos)) = (is_tap, press_origin, release_pos) {
+                let origin = origin.to_vec2();
+                let pcell =
+                    lay.cells.iter().enumerate().find_map(|(i, r)| r.translate(origin).contains(pos2(press_pos[0], press_pos[1])).then_some(ids[i]));
+                if let Some(pcell) = pcell {
+                    // only fire if the pointer is still over the same cell
+                    if lay.cells.iter().enumerate().any(|(i, r)| ids[i] == pcell && r.translate(origin).contains(release_pos)) {
+                        if is_touch {
+                            // a single tap on a touch screen opens the photo like Lightroom mobile
+                            let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
+                            let _ = app.run("view.detail", json!({}));
+                        } else {
+                            let modifiers = ui.ctx().input(|i| i.modifiers);
+                            if !app.session.selection.contains(pcell) && modifiers.is_none() {
+                                let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
+                            } else if modifiers.shift {
+                                let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "range"}));
+                            } else if modifiers.command || modifiers.ctrl {
+                                let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "toggle"}));
+                            } else if !app.session.selection.contains(pcell) {
+                                let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
+                            }
+                            let now = ui.input(|i| i.time);
+                            let last: Option<(PhotoId, f64)> = ui.ctx().data(|d| d.get_temp(egui::Id::new("cell-dblclick")));
+                            let dbl = last.is_some_and(|(was, when)| was == pcell && now - when < 0.5);
+                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("cell-dblclick"), (pcell, now)));
+                            if dbl {
+                                let _ = app.run("library.select", json!({"ids": [pcell.0]}));
+                                let _ = app.run("view.detail", json!({}));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let Some(r) = scroll_to {
             ui.scroll_to_rect(r.translate(origin.to_vec2()), None);
         }
@@ -625,9 +701,8 @@ fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square
     if photo.flag == Flag::Reject {
         p.rect_filled(img_rect, 0.0, Color32::from_black_alpha(110));
     }
-    // interaction
+    // keyword painting (still per-cell)
     if let Some(k) = app.ui.keyword_painter.clone() {
-        // painting: a click toggles the keyword on this photo
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
@@ -638,45 +713,7 @@ fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square
         }
         return;
     }
-    // pointer state for this cell: only act on release, and only as a click if it barely moved
-    let hovered = resp.hovered();
-    let pressed = hovered && ui.input(|i| i.pointer.any_pressed());
-    let released = ui.input(|i| i.pointer.any_released());
-    let press_origin = pressed.then(|| ui.input(|i| i.pointer.press_origin())).flatten();
-    let latest_pos = ui.input(|i| i.pointer.latest_pos());
-    let drag_dist_sq = press_origin.and_then(|o| latest_pos.map(|p| (p.x - o.x).powi(2) + (p.y - o.y).powi(2)));
-    let threshold = 6.0_f32.powi(2);
-    let is_drag = drag_dist_sq.is_some_and(|d| d > threshold);
-    if released {
-        if is_drag {
-            // far enough from press origin → drag the selection to an album
-            if !app.session.selection.contains(id) {
-                let _ = app.run("library.select", json!({"ids": [id.0]}));
-            }
-            app.ui.dragging_photos = Some(app.session.selection.ids.iter().map(|p| p.0).collect());
-        } else if press_origin.is_some() {
-            // tap: select (or range/toggle with modifiers)
-            let modifiers = ui.ctx().input(|i| i.modifiers);
-            if !app.session.selection.contains(id) && modifiers.is_none() {
-                let _ = app.run("library.select", json!({"ids": [id.0], "mode": "replace"}));
-            } else if modifiers.shift {
-                let _ = app.run("library.select", json!({"ids": [id.0], "mode": "range"}));
-            } else if modifiers.command || modifiers.ctrl {
-                let _ = app.run("library.select", json!({"ids": [id.0], "mode": "toggle"}));
-            } else if !app.session.selection.contains(id) {
-                let _ = app.run("library.select", json!({"ids": [id.0], "mode": "replace"}));
-            }
-            // double-click: enter detail view
-            let elapsed = web_time::Instant::now().elapsed().as_secs_f64();
-            let last: Option<(PhotoId, f64)> = ui.ctx().data(|d| d.get_temp(egui::Id::new("cell-dblclick")));
-            let dbl = last.is_some_and(|(was, when)| was == id && elapsed - when < 0.5);
-            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("cell-dblclick"), (id, elapsed)));
-            if dbl {
-                let _ = app.run("library.select", json!({"ids": [id.0]}));
-                let _ = app.run("view.detail", json!({}));
-            }
-        }
-    }
+    // tap/click/drag are handled globally in show_inner via pointer tracking
     resp.context_menu(|ui| context_menu(app, ui, id));
 }
 
@@ -755,6 +792,21 @@ pub fn drag_feedback(app: &mut LightcraftApp, ctx: &egui::Context) {
             );
         });
     });
+}
+
+fn handle_pinch_zoom(app: &mut LightcraftApp, ui: &mut egui::Ui, _full: Rect) {
+    let factor = ui.input(|i| i.zoom_delta());
+    if !factor.is_finite() || factor <= 0.0 || (factor - 1.0).abs() < 0.01 {
+        return;
+    }
+    const MIN: f32 = 90.0;
+    const MAX: f32 = 480.0;
+    let new_size = (app.ui.thumb_size * factor).clamp(MIN, MAX);
+    if (new_size - app.ui.thumb_size).abs() < 0.5 {
+        return;
+    }
+    app.ui.thumb_size = new_size;
+    ui.ctx().request_repaint();
 }
 
 pub use super::filterbar::label_color;
