@@ -475,7 +475,7 @@ pub const BACKGROUND_THUMB_PRIORITY: u32 = 3;
 fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square: bool, onscreen: bool, ppp: f32) {
     let t = Tokens::get(ui.ctx());
     let Some(photo) = app.session.catalog.photo(id).cloned() else { return };
-    let resp = ui.interact(r, egui::Id::new(("cell", id.0)), Sense::click_and_drag());
+    let resp = ui.interact(r, egui::Id::new(("cell", id.0)), Sense::hover());
     register(ui.ctx(), format!("thumb:{}", id.0), r);
     let state = app.session.selection.state_of(id);
     let selected = state != lightcraft_engine::SelectionState::NotSelected;
@@ -631,34 +631,51 @@ fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
-        if resp.clicked() {
+        if resp.hovered() && ui.input(|i| i.pointer.any_pressed()) {
             let has = photo.meta.keywords.iter().any(|x| x.eq_ignore_ascii_case(&k));
             let key = if has { "removeKeywords" } else { "addKeywords" };
             let _ = app.run("photo.setMeta", json!({"ids": [id.0], key: [k]}));
         }
         return;
     }
-    if resp.clicked() {
-        let m = ui.input(|i| i.modifiers);
-        let mode = if m.shift {
-            "range"
-        } else if m.command {
-            "toggle"
-        } else {
-            "replace"
-        };
-        let _ = app.run("library.select", json!({"ids": [id.0], "mode": mode}));
-    }
-    if resp.double_clicked() {
-        let _ = app.run("library.select", json!({"ids": [id.0]}));
-        let _ = app.run("view.detail", json!({}));
-    }
-    // drag the selection (this photo joins it, or replaces it when it wasn't selected)
-    if resp.drag_started() {
-        if !app.session.selection.contains(id) {
-            let _ = app.run("library.select", json!({"ids": [id.0]}));
+    // pointer state for this cell: only act on release, and only as a click if it barely moved
+    let hovered = resp.hovered();
+    let pressed = hovered && ui.input(|i| i.pointer.any_pressed());
+    let released = ui.input(|i| i.pointer.any_released());
+    let press_origin = pressed.then(|| ui.input(|i| i.pointer.press_origin())).flatten();
+    let latest_pos = ui.input(|i| i.pointer.latest_pos());
+    let drag_dist_sq = press_origin.and_then(|o| latest_pos.map(|p| (p.x - o.x).powi(2) + (p.y - o.y).powi(2)));
+    let threshold = 6.0_f32.powi(2);
+    let is_drag = drag_dist_sq.is_some_and(|d| d > threshold);
+    if released {
+        if is_drag {
+            // far enough from press origin → drag the selection to an album
+            if !app.session.selection.contains(id) {
+                let _ = app.run("library.select", json!({"ids": [id.0]}));
+            }
+            app.ui.dragging_photos = Some(app.session.selection.ids.iter().map(|p| p.0).collect());
+        } else if press_origin.is_some() {
+            // tap: select (or range/toggle with modifiers)
+            let modifiers = ui.ctx().input(|i| i.modifiers);
+            if !app.session.selection.contains(id) && modifiers.is_none() {
+                let _ = app.run("library.select", json!({"ids": [id.0], "mode": "replace"}));
+            } else if modifiers.shift {
+                let _ = app.run("library.select", json!({"ids": [id.0], "mode": "range"}));
+            } else if modifiers.command || modifiers.ctrl {
+                let _ = app.run("library.select", json!({"ids": [id.0], "mode": "toggle"}));
+            } else if !app.session.selection.contains(id) {
+                let _ = app.run("library.select", json!({"ids": [id.0], "mode": "replace"}));
+            }
+            // double-click: enter detail view
+            let elapsed = web_time::Instant::now().elapsed().as_secs_f64();
+            let last: Option<(PhotoId, f64)> = ui.ctx().data(|d| d.get_temp(egui::Id::new("cell-dblclick")));
+            let dbl = last.is_some_and(|(was, when)| was == id && elapsed - when < 0.5);
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("cell-dblclick"), (id, elapsed)));
+            if dbl {
+                let _ = app.run("library.select", json!({"ids": [id.0]}));
+                let _ = app.run("view.detail", json!({}));
+            }
         }
-        app.ui.dragging_photos = Some(app.session.selection.ids.iter().map(|p| p.0).collect());
     }
     resp.context_menu(|ui| context_menu(app, ui, id));
 }
