@@ -126,6 +126,16 @@ fn general_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
     heading(ui, t, crate::i18n::tr("Culling"));
     check(ui, "settings.autoAdvance", &mut app.ui.auto_advance, "Auto Advance: move to the next photo after rating or flagging");
     check(ui, "settings.confirmDelete", &mut app.ui.settings.confirm_delete, "Confirm before moving photos to Recently Deleted");
+    let mut variants = app.session.variant_sync;
+    if check(
+        ui,
+        "settings.variantSync",
+        &mut variants,
+        "Set flags, ratings and labels on the same-name files with another extension in the folder (x.jpg and x.raw)",
+    ) {
+        let _ = app.run("library.preferences", json!({"variantSync": variants}));
+    }
+    hint(ui, t, crate::i18n::tr("Only flags, ratings and colour labels are shared; photo edits are never copied."));
     heading(ui, t, crate::i18n::tr("External Editor"));
     row(ui, t, crate::i18n::tr("Application"), |ui| {
         let r = ui

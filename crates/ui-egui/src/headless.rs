@@ -1870,6 +1870,12 @@ mod tests {
         // General: confirm before delete, startup view
         h.request("ui.clickWidget", json!({"id": "check:settings.confirmDelete"}), t);
         assert!(h.app.ui.settings.confirm_delete);
+        // same-name file properties: on by default, the checkbox turns it off
+        assert!(h.app.session.variant_sync);
+        h.request("ui.clickWidget", json!({"id": "check:settings.variantSync"}), t);
+        assert!(!h.app.session.variant_sync);
+        h.request("ui.clickWidget", json!({"id": "check:settings.variantSync"}), t);
+        assert!(h.app.session.variant_sync);
         h.request("ui.clickWidget", json!({"id": "button:settingsStartup-2"}), t);
         assert_eq!(h.app.ui.settings.startup_view, crate::state::StartupView::Detail);
         // Interface: filmstrip names off, grid badges always
