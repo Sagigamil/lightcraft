@@ -623,3 +623,24 @@ fn detail_view_shows_the_file_name_over_the_photo() {
     h.settle(SETTLE);
     assert!(h.app.widgets.iter().all(|(id, _)| id != "canvas:filename"), "the info overlay already shows the name");
 }
+
+/// The filter bar matches the grid's width and wraps onto more rows when a side panel narrows
+/// it, so none of its controls end up hidden behind the panel.
+#[test]
+fn filter_bar_wraps_to_fit_a_narrow_grid() {
+    let mut h = demo([900.0, 800.0], json!({"view": "photoGrid", "right": "edit", "filterBar": true}));
+    let bar = widget(&h, "filterbar");
+    let grid = h.app.canvas_rect.expect("grid drawn");
+    assert!((bar.width() - grid.width()).abs() <= 1.0, "the bar {} matches the grid width {}", bar.width(), grid.width());
+    assert!(bar.height() > 60.0, "a narrow grid wraps the controls onto more rows: {}", bar.height());
+    for id in ["filter:star3", "filter:pick", "filter:label-red", "button:filterSave", "button:filterClear", "button:filterPresets"] {
+        let r = widget(&h, id);
+        assert!(bar.shrink(1.0).contains_rect(r), "{id} {r:?} is hidden outside the filter bar {bar:?}");
+    }
+    // a wide grid keeps it to one row
+    let r = h.request("ui.set", json!({"right": "none"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    let wide = widget(&h, "filterbar");
+    assert!(wide.height() < 2.0 * crate::panels::filterbar::HEIGHT, "a wide grid needs one row: {}", wide.height());
+}
