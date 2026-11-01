@@ -642,17 +642,17 @@ fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square
     }
     // interaction: use Sense::click_and_drag so the cell receives pointer press/release events,
     // but defer the tap-vs-drag decision to pointer release using a movement threshold.
-    // This lets the ScrollArea keep scrolling when the finger barely moved (no pre-emption).
+    // touch jitter causes drag_started to fire on tap; we suppress it when movement < 3px.
     let pressed = resp.hovered() && ui.input(|i| i.pointer.any_pressed());
     let released = ui.input(|i| i.pointer.any_released());
     let press_origin = pressed.then(|| ui.input(|i| i.pointer.press_origin())).flatten();
     let latest_pos = ui.input(|i| i.pointer.latest_pos());
     let drag_dist_sq = press_origin.and_then(|o| latest_pos.map(|p| (p.x - o.x).powi(2) + (p.y - o.y).powi(2)));
-    let threshold = 6.0_f32.powi(2);
-    let is_drag = drag_dist_sq.is_some_and(|d| d > threshold);
+    let threshold = 3.0_f32.powi(2);
+    let is_tap = drag_dist_sq.is_some_and(|d| d <= threshold);
     if released {
-        if is_drag {
-            // finger moved far enough → drag the selection to an album
+        if !is_tap {
+            // real drag: initiate photo drag to album
             if !app.session.selection.contains(id) {
                 let _ = app.run("library.select", json!({"ids": [id.0]}));
             }
