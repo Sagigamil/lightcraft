@@ -42,6 +42,9 @@ jobs:
           rm cmdline-tools.zip
           yes | latest/bin/sdkmanager --licenses --sdk_root="$GITHUB_WORKSPACE/android-sdk" || true
           latest/bin/sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;$ANDROID_NDK_VERSION" --sdk_root="$GITHUB_WORKSPACE/android-sdk"
+          echo "ANDROID_HOME=$GITHUB_WORKSPACE/android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$GITHUB_WORKSPACE/android-sdk" >> "$GITHUB_ENV"
+          echo "JAVA_HOME=/opt/hostedtoolcache/Java_Microsoft_jdk/17.0.19/x64" >> "$GITHUB_ENV"
         env:
           ANDROID_NDK_VERSION: ${{ env.ANDROID_NDK_VERSION }}
 
@@ -55,7 +58,6 @@ jobs:
 
       - name: Build Rust library
         env:
-          ANDROID_HOME: ${{ github.workspace }}/android-sdk
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           CC_aarch64-linux-android: ${{ github.workspace }}/android-sdk/ndk/${{ env.ANDROID_NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang
           CXX_aarch64-linux-android: ${{ github.workspace }}/android-sdk/ndk/${{ env.ANDROID_NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++
@@ -71,8 +73,6 @@ jobs:
           "$bin/llvm-strip" --strip-debug android/app/src/main/jniLibs/arm64-v8a/liblightcraft_android.so
 
       - name: Build APK
-        env:
-          ANDROID_HOME: ${{ github.workspace }}/android-sdk
         run: |
           cd android
           chmod +x gradlew
