@@ -251,7 +251,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-EDIT-COLOR-MIXER-HSL | 8-band colour mixer | P0 | ✅ | `ctl:mixer.*` | no targeted (drag-on-image) mode |
 | LR-EDIT-COLOR-MIXER-BW | B&W mix | P1 | ✅ | `ctl:bw.*`, `cmd:develop.autoBwMix` | eight bands; Auto pushes each hue band's colourful pixels away from the mean lightness (own rule) |
 | LR-EDIT-COLOR-POINTCOLOR | Point colour | P1 | ✅ | `cmd:pointColor.pick`, `cmd:pointColor.delete` | |
-| LR-EDIT-COLOR-GRADING | Colour grading wheels | P0 | ✅ | `ctl:grading.*` | |
+| LR-EDIT-COLOR-GRADING | Colour grading wheels | P0 | ✅ | `ctl:grading.*` | 3-Way / Shadows / Midtones / Highlights tabs; three equal wheels (Midtones above) in 3-Way, one large wheel plus Hue / Saturation / Luminance in a range tab; Shift keeps the hue, Cmd/Ctrl the saturation, Alt fine-adjusts; each wheel's eye hides its tint for viewing (per photo, not an edit); Blending / Balance |
 | LR-EDIT-EFFECTS-TEXTURE | Texture | P0 | ✅ | `ctl:effects.texture` | |
 | LR-EDIT-EFFECTS-CLARITY | Clarity | P0 | ✅ | `ctl:effects.clarity` | |
 | LR-EDIT-EFFECTS-DEHAZE | Dehaze | P0 | ✅ | `ctl:effects.dehaze` | |

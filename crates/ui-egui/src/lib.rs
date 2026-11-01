@@ -32,6 +32,8 @@ mod tests_curve;
 #[cfg(test)]
 mod tests_filmstrip;
 #[cfg(test)]
+mod tests_grading;
+#[cfg(test)]
 mod tests_grid;
 #[cfg(test)]
 mod tests_keymap;
@@ -836,6 +838,7 @@ impl LightcraftApp {
             panels::dialogs::show(self, &ctx);
             panels::library_problem::show(self, &ctx);
             panels::toast(self, &ctx);
+            panels::edit::wheel_pointer_frame_end(&ctx);
             self.widgets = widgets::take_registry(&ctx);
             self.end_frame(t0);
             return;
@@ -880,6 +883,7 @@ impl LightcraftApp {
         export_task::poll(self, &ctx);
         panels::grid::drag_feedback(self, &ctx);
         panels::toast(self, &ctx);
+        panels::edit::wheel_pointer_frame_end(&ctx);
         self.widgets = widgets::take_registry(&ctx);
         self.end_frame(t0);
     }
