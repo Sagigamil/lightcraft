@@ -1,6 +1,12 @@
 //! The Edit panel: histogram, Auto/B&W, profile, and the Light / Color / Effects / Detail / Optics
 //! sections, built from the engine's control specs.
 
+mod grading;
+use grading::grading;
+pub(crate) use grading::wheel_pointer_frame_end;
+#[cfg(test)]
+pub(crate) use grading::{WheelGrab, WheelLock, WheelMods, wheel_pick};
+
 use egui::epaint::{Mesh, Vertex};
 use egui::{Align2, Color32, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 use lightcraft_catalog::PhotoId;
@@ -228,8 +234,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         if flyout_row(ui, "grading", crate::i18n::tr("Color Grading"), Icon::Presets, open).clicked() {
             app.ui.toggle_flyout("grading");
         }
-        if open {
-            grading(app, ui, d);
+        if open && let Some(photo) = app.session.active() {
+            grading(app, ui, d, photo);
         }
         ui.add_space(8.0);
     });
@@ -1053,72 +1059,7 @@ fn point_color(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings) 
 }
 
 // ------------------------------------------------------------------------------ colour grading
-
-fn grading(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings) {
-    let t = Tokens::get(ui.ctx());
-    let w = ui.available_width();
-    let (area, _) = ui.allocate_exact_size(vec2(w, 250.0), Sense::hover());
-    let big = 44.0;
-    let small = 38.0;
-    let wheels = [
-        ("midtones", "Midtones", pos2(area.center().x, area.top() + 60.0), big),
-        ("shadows", "Shadows", pos2(area.left() + w * 0.28, area.top() + 170.0), small),
-        ("highlights", "Highlights", pos2(area.left() + w * 0.72, area.top() + 170.0), small),
-    ];
-    for (key, label, c, rad) in wheels {
-        let wh = match key {
-            "shadows" => d.grading.shadows,
-            "midtones" => d.grading.midtones,
-            _ => d.grading.highlights,
-        };
-        let r = Rect::from_center_size(c, vec2(rad * 2.0, rad * 2.0));
-        let resp = ui.interact(r, egui::Id::new(("wheel", key)), Sense::click_and_drag());
-        register(ui.ctx(), format!("wheel:{key}"), r);
-        paint_wheel(ui.painter(), c, rad);
-        let a = (wh.hue as f32).to_radians();
-        let dot = c + vec2(a.cos(), -a.sin()) * rad * (wh.sat as f32 / 100.0);
-        ui.painter().circle_filled(dot, 5.0, Color32::WHITE);
-        ui.painter().circle_stroke(dot, 5.0, Stroke::new(1.0, Color32::BLACK));
-        ui.painter().text(pos2(c.x, c.y + rad + 12.0), Align2::CENTER_CENTER, crate::i18n::tr(label), t.font(12.0), t.text_label);
-        if resp.drag_started() {
-            let _ = app.run("develop.beginInteraction", json!({"label": crate::i18n::tr_format!("{label} Grading", label = label)}));
-        }
-        if (resp.dragged() || resp.clicked())
-            && let Some(q) = resp.interact_pointer_pos()
-        {
-            let v = q - c;
-            let hue = ((-v.y).atan2(v.x).to_degrees() + 360.0) % 360.0;
-            let sat = (v.length() / rad * 100.0).min(100.0);
-            let _ = app.run("develop.set", json!({"values": {format!("grading.{key}.hue"): hue.round(), format!("grading.{key}.sat"): sat.round()}}));
-        }
-        if resp.drag_stopped() || resp.clicked() {
-            let _ = app.run("develop.endInteraction", json!({}));
-        }
-        if resp.double_clicked() {
-            let _ = app.run("develop.set", json!({"values": {format!("grading.{key}.hue"): 0, format!("grading.{key}.sat"): 0}}));
-        }
-    }
-    for c in ["grading.shadows.lum", "grading.midtones.lum", "grading.highlights.lum", "grading.blending", "grading.balance"] {
-        control(app, ui, d, c, true);
-    }
-}
-
-fn paint_wheel(p: &egui::Painter, c: Pos2, rad: f32) {
-    let mut mesh = Mesh::default();
-    let n = 48;
-    mesh.vertices.push(Vertex { pos: c, uv: Pos2::ZERO, color: Color32::from_gray(128) });
-    for i in 0..=n {
-        let a = i as f32 / n as f32 * std::f32::consts::TAU;
-        let rgb = lightcraft_color::perceptual::hsv_to_rgb(a.to_degrees(), 0.75, 0.8);
-        let col = Color32::from_rgb((rgb[0] * 255.0) as u8, (rgb[1] * 255.0) as u8, (rgb[2] * 255.0) as u8);
-        mesh.vertices.push(Vertex { pos: c + vec2(a.cos(), -a.sin()) * rad, uv: Pos2::ZERO, color: col });
-        if i > 0 {
-            mesh.indices.extend([0, i as u32, i as u32 + 1]);
-        }
-    }
-    p.add(mesh);
-    p.circle_stroke(c, rad, Stroke::new(1.0, Color32::from_gray(40)));
-}
+// (the panel lives in `grading.rs`; the control ids are the engine's `grading.*` specs)
 
 /// Quick Develop (grid with several photos selected): relative steps applied to every selected
 /// photo from its own value.

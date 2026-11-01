@@ -318,6 +318,10 @@ pub struct UiState {
     pub mixer_mode: String,
     /// Selected colour grading wheel: "3way" | "shadows" | "midtones" | "highlights" | "global".
     pub grading_mode: String,
+    /// Colour grading wheels (shadows, midtones, highlights) hidden for viewing by their eye, and
+    /// the photo that applies to: not an edit, and forgotten on moving to another photo or quitting.
+    #[serde(skip)]
+    pub grading_hidden: Option<(lightcraft_catalog::PhotoId, [bool; 3])>,
     /// Active on-canvas tool: "", "brush", "linear", "radial", "wbPicker", "straighten", "remove".
     pub tool: String,
     pub brush_size: f32,
@@ -606,6 +610,7 @@ impl Default for UiState {
             curve_channel: "parametric".into(),
             mixer_mode: "hue".into(),
             grading_mode: "3way".into(),
+            grading_hidden: None,
             tool: String::new(),
             brush_size: 0.04,
             brush_feather: 50.0,
@@ -676,6 +681,22 @@ impl UiState {
         } else {
             self.open_flyouts.push(id.to_string());
         }
+    }
+    /// Which colour grading wheels (0 shadows, 1 midtones, 2 highlights) the eye has hidden for
+    /// viewing `photo`.
+    pub fn grading_hidden_for(&self, photo: lightcraft_catalog::PhotoId) -> [bool; 3] {
+        match self.grading_hidden {
+            Some((p, h)) if p == photo => h,
+            _ => [false; 3],
+        }
+    }
+    /// Show or hide colour grading wheel `i` (0 shadows, 1 midtones, 2 highlights) on `photo`.
+    pub fn set_grading_hidden(&mut self, photo: lightcraft_catalog::PhotoId, i: usize, hidden: bool) {
+        let mut h = self.grading_hidden_for(photo);
+        if let Some(slot) = h.get_mut(i) {
+            *slot = hidden;
+        }
+        self.grading_hidden = h.iter().any(|x| *x).then_some((photo, h));
     }
     /// Clamp values restored from disk.
     pub fn sanitized(mut self) -> Self {
