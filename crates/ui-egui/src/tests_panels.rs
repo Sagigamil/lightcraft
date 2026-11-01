@@ -624,6 +624,23 @@ fn detail_view_shows_the_file_name_over_the_photo() {
     assert!(h.app.widgets.iter().all(|(id, _)| id != "canvas:filename"), "the info overlay already shows the name");
 }
 
+/// The Color Mixer's swatches and Hue/Saturation/Luminance tabs wrap within the narrowest right
+/// panel, so nothing runs under the tool strip.
+#[test]
+fn colour_mixer_wraps_inside_a_narrow_right_panel() {
+    let h =
+        demo([1143.0, 712.0], json!({"view": "detail", "right": "edit", "rightWidth": 250.0, "openSections": ["color"], "openFlyouts": ["mixer"]}));
+    let panel = widget(&h, "panel:right_panel");
+    let mut seen = 0;
+    for (id, r) in &h.app.widgets {
+        if id.starts_with("mixerBand:") || id.starts_with("button:tatMixer-") {
+            assert!(r.right() <= panel.right() - 18.0, "{id} {r:?} runs under the tool strip (panel {panel:?})");
+            seen += 1;
+        }
+    }
+    assert!(seen >= 10, "expected the mixer controls, saw {seen}");
+}
+
 /// The filter bar matches the grid's width and wraps onto more rows when a side panel narrows
 /// it, so none of its controls end up hidden behind the panel.
 #[test]
