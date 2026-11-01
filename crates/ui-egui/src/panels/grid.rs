@@ -327,7 +327,7 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 visible_ids.insert(id);
                 let r = rect.translate(origin.to_vec2());
                 let onscreen = rect.intersects(viewport);
-                cell(app, ui, id, r, square, onscreen, ppp);
+                cell(app, ui, id, r, square, onscreen, ppp, is_touch);
                 if let Some((sid, pos)) = stacks.get(&id) {
                     stack_badge(app, ui, id, *sid, *pos, r, square);
                 }
@@ -548,10 +548,11 @@ pub fn request_thumb(app: &mut LightcraftApp, id: PhotoId, size: usize, priority
 /// Rendered thumbnails replacing embedded previews: after everything on screen.
 pub const BACKGROUND_THUMB_PRIORITY: u32 = 3;
 
-fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square: bool, onscreen: bool, ppp: f32) {
+fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square: bool, onscreen: bool, ppp: f32, touch: bool) {
     let t = Tokens::get(ui.ctx());
     let Some(photo) = app.session.catalog.photo(id).cloned() else { return };
-    let resp = ui.interact(r, egui::Id::new(("cell", id.0)), Sense::hover());
+    // A mouse drag starts a photo drag (drop on an album); a touch drag scrolls the grid instead.
+    let resp = ui.interact(r, egui::Id::new(("cell", id.0)), if touch { Sense::hover() } else { Sense::click_and_drag() });
     register(ui.ctx(), format!("thumb:{}", id.0), r);
     let state = app.session.selection.state_of(id);
     let selected = state != lightcraft_engine::SelectionState::NotSelected;
@@ -713,7 +714,14 @@ fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square
         }
         return;
     }
-    // tap/click/drag are handled globally in show_inner via pointer tracking
+    // a mouse press-and-drag starts a photo drag (drop on an album); tap/click selection is
+    // handled globally in show_inner
+    if resp.drag_started() {
+        if !app.session.selection.contains(id) {
+            let _ = app.run("library.select", json!({"ids": [id.0]}));
+        }
+        app.ui.dragging_photos = Some(app.session.selection.ids.iter().map(|p| p.0).collect());
+    }
     resp.context_menu(|ui| context_menu(app, ui, id));
 }
 

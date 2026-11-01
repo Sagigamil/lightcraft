@@ -51,5 +51,8 @@ jobs:
             git config --global --add safe.directory "*"
             rustc --version
             export CRAFT_FONTS_DIR="$PWD/craft-fonts" CRAFT_FONTS_REQUIRED=1
+            # Software rendering on a 4-vCPU VM: fewer parallel UI tests keep the snapshot and
+            # headless render tests from starving each other (they timed out under full load).
+            export RUST_TEST_THREADS=2
             CARGO_PROFILE_DEV_DEBUG=0 cargo build --workspace --all-targets --locked
             CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --locked
