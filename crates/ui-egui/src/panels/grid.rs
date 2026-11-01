@@ -477,7 +477,7 @@ pub const BACKGROUND_THUMB_PRIORITY: u32 = 3;
 fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square: bool, onscreen: bool, ppp: f32) {
     let t = Tokens::get(ui.ctx());
     let Some(photo) = app.session.catalog.photo(id).cloned() else { return };
-    let resp = ui.interact(r, egui::Id::new(("cell", id.0)), Sense::hover());
+    let resp = ui.interact(r, egui::Id::new(("cell", id.0)), Sense::click_and_drag());
     register(ui.ctx(), format!("thumb:{}", id.0), r);
     let state = app.session.selection.state_of(id);
     let selected = state != lightcraft_engine::SelectionState::NotSelected;
@@ -640,9 +640,10 @@ fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square
         }
         return;
     }
-    // pointer state for this cell: only act on release, and only as a click if it barely moved
-    let hovered = resp.hovered();
-    let pressed = hovered && ui.input(|i| i.pointer.any_pressed());
+    // interaction: use Sense::click_and_drag so the cell receives pointer press/release events,
+    // but defer the tap-vs-drag decision to pointer release using a movement threshold.
+    // This lets the ScrollArea keep scrolling when the finger barely moved (no pre-emption).
+    let pressed = resp.hovered() && ui.input(|i| i.pointer.any_pressed());
     let released = ui.input(|i| i.pointer.any_released());
     let press_origin = pressed.then(|| ui.input(|i| i.pointer.press_origin())).flatten();
     let latest_pos = ui.input(|i| i.pointer.latest_pos());
@@ -651,7 +652,7 @@ fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square
     let is_drag = drag_dist_sq.is_some_and(|d| d > threshold);
     if released {
         if is_drag {
-            // far enough from press origin → drag the selection to an album
+            // finger moved far enough → drag the selection to an album
             if !app.session.selection.contains(id) {
                 let _ = app.run("library.select", json!({"ids": [id.0]}));
             }
