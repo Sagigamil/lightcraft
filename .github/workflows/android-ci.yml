@@ -57,24 +57,17 @@ jobs:
         env:
           ANDROID_HOME: ${{ github.workspace }}/android-sdk
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          CC_aarch64-linux-android: ${{ github.workspace }}/android-sdk/ndk/${{ env.ANDROID_NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang
+          CXX_aarch64-linux-android: ${{ github.workspace }}/android-sdk/ndk/${{ env.ANDROID_NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ github.workspace }}/android-sdk/ndk/${{ env.ANDROID_NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang
         run: |
-          target=aarch64-linux-android
-          ndk="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
-          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          linker="$bin/${target}29-clang"
-          echo "CARGO_TARGET_${target^^}_LINKER=$linker" >> "$GITHUB_ENV"
-          cargo build --locked -p lightcraft-android --target "$target" --release
+          cargo build --locked -p lightcraft-android --target aarch64-linux-android --release
 
       - name: Prepare native library
-        env:
-          ANDROID_HOME: ${{ github.workspace }}/android-sdk
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
-          target=aarch64-linux-android
-          ndk="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
-          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          bin="${{ github.workspace }}/android-sdk/ndk/${{ env.ANDROID_NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           mkdir -p android/app/src/main/jniLibs/arm64-v8a
-          cp target/$target/release/liblightcraft_android.so android/app/src/main/jniLibs/arm64-v8a/
+          cp target/aarch64-linux-android/release/liblightcraft_android.so android/app/src/main/jniLibs/arm64-v8a/
           "$bin/llvm-strip" --strip-debug android/app/src/main/jniLibs/arm64-v8a/liblightcraft_android.so
 
       - name: Build APK
