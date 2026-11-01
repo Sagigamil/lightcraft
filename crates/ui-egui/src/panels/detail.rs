@@ -422,6 +422,12 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     register(ui.ctx(), "canvas:image", img_rect);
     let map = CanvasMap::new(&frame, img_rect);
     info_overlay(app, &p, canvas, &photo);
+    // keep the opened photo identifiable (e.g. full-screen, or on touch devices with no
+    // info-overlay toggle): the file name at the top of the image unless the info overlay
+    // already shows it
+    if app.ui.info_overlay == crate::state::InfoOverlay::Off {
+        filename_overlay(&p, canvas, &photo.file_name);
+    }
     if !fullscreen {
         filter_pill(app, ui, canvas);
     }
@@ -527,6 +533,19 @@ fn info_overlay(app: &LightcraftApp, p: &egui::Painter, canvas: Rect, photo: &li
         y += g.size().y + 3.0;
     }
     register(p.ctx(), "canvas:infoOverlay", Rect::from_min_max(canvas.min, pos2(canvas.left() + 320.0, y)));
+}
+
+/// The opened photo's file name at the canvas' top left, shown when the info overlay is off so
+/// the photo is always identifiable (full-screen, or on touch devices with no overlay toggle).
+fn filename_overlay(p: &egui::Painter, canvas: Rect, name: &str) {
+    let t = Tokens::get(p.ctx());
+    let g = p.layout_no_wrap(name.to_owned(), t.semibold(15.0), Color32::WHITE);
+    let at = pos2(canvas.left() + 14.0, canvas.top() + 12.0);
+    let rect = Rect::from_min_size(at, g.size());
+    // a soft shadow keeps the text readable on bright photos
+    p.galley(at + vec2(1.0, 1.0), g.clone(), Color32::from_black_alpha(200));
+    p.galley(at, g, Color32::WHITE);
+    register(p.ctx(), "canvas:filename", rect);
 }
 
 /// What the user did to a face box this frame.

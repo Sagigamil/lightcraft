@@ -609,3 +609,17 @@ fn date_and_keyword_rows_show_their_photos_from_any_source() {
     h.step();
     assert_eq!(h.app.session.filter, lightcraft_catalog::Filter::default(), "{key}");
 }
+
+/// The opened photo's file name is drawn over the image when the info overlay is off, so the
+/// full-screen loupe always says which photo it is; with the info overlay on, it owns the name.
+#[test]
+fn detail_view_shows_the_file_name_over_the_photo() {
+    let mut h = demo([1400.0, 900.0], json!({"view": "detail"}));
+    let name = widget(&h, "canvas:filename");
+    let canvas = h.app.canvas_rect.expect("canvas drawn");
+    assert!(canvas.contains_rect(name), "file name {name:?} sits over the image canvas {canvas:?}");
+    let r = h.request("ui.set", json!({"infoOverlay": "basic"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    assert!(h.app.widgets.iter().all(|(id, _)| id != "canvas:filename"), "the info overlay already shows the name");
+}
