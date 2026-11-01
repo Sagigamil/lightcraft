@@ -155,3 +155,52 @@ fn unloaded_thumbnails_show_their_selection() {
     }
     assert!(checked >= 3, "checked {checked}");
 }
+
+fn press(pos: egui::Pos2) -> egui::Event {
+    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }
+}
+
+fn release(pos: egui::Pos2) -> egui::Event {
+    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }
+}
+
+fn touch_start(pos: egui::Pos2) -> egui::Event {
+    egui::Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(0), phase: egui::TouchPhase::Start, pos, force: None }
+}
+
+/// A single touch tap on a photo opens it in the detail view (Lightroom mobile), even though
+/// egui-winit sends `PointerGone` right after the release (so `latest_pos` is already `None`).
+#[test]
+fn touch_tap_opens_detail_view() {
+    let mut h = grid(ViewMode::PhotoGrid);
+    let target = h.app.session.visible()[0];
+    let r = widget(&h, &format!("thumb:{}", target.0)).expect("first cell is visible");
+    let p = r.center();
+    h.app.synthetic.push(press(p));
+    h.step();
+    h.app.synthetic.push(touch_start(p));
+    h.step();
+    h.app.synthetic.push(release(p));
+    h.step();
+    assert_eq!(h.app.ui.view, ViewMode::Detail, "a touch tap opens the detail view");
+    assert_eq!(h.app.session.selection.active, Some(target));
+}
+
+/// Dragging on a photo (scrolling the grid) must not open the detail view.
+#[test]
+fn touch_drag_does_not_open_detail_view() {
+    let mut h = grid(ViewMode::PhotoGrid);
+    let target = h.app.session.visible()[0];
+    let r = widget(&h, &format!("thumb:{}", target.0)).expect("first cell is visible");
+    let start = r.center();
+    let end = egui::pos2(start.x, start.y - 80.0);
+    h.app.synthetic.push(press(start));
+    h.step();
+    h.app.synthetic.push(touch_start(start));
+    h.step();
+    h.app.synthetic.push(egui::Event::PointerMoved(end));
+    h.step();
+    h.app.synthetic.push(release(end));
+    h.step();
+    assert_eq!(h.app.ui.view, ViewMode::PhotoGrid, "a drag scrolls instead of opening the photo");
+}

@@ -256,23 +256,34 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let stacks = app.caches.grid.stacks(stats, &app.session.catalog, generation);
     let total_h = lay.height + 12.0;
     let active = app.session.selection.active;
-    // handle deferred tap detection (needs lay to check cell rects)
-    if was_released && !multi_was_active {
-        let latest_pos = ui.input(|i| i.pointer.latest_pos());
-        let drag_dist_sq = press_origin.and_then(|o| latest_pos.map(|p| (p.x - o[0]).powi(2) + (p.y - o[1]).powi(2)));
-        let threshold = 6.0_f32.powi(2);
-        let is_tap = !drag_dist_sq.is_some_and(|d| d > threshold);
-        if is_tap && press_origin.is_some() && latest_pos.is_some() {
-            // find which cell the press started on and the current hover cell
-            if let (Some(press_pos), Some(hover_pos)) = (press_origin, latest_pos) {
-                let pcell = lay
-                    .cells
-                    .iter()
-                    .enumerate()
-                    .find_map(|(i, r)| r.translate(full.min.to_vec2()).contains(pos2(press_pos[0], press_pos[1])).then_some(ids[i]));
+    // bring the active photo into view when it changes (keyboard, click, command) or the grid
+    // comes back on screen; otherwise the scroll position is the user's
+    let scroll_to: Option<Rect> = if follow_active(ui.ctx(), egui::Id::new("grid-follow-active"), active) {
+        active.and_then(|a| ids.iter().position(|x| *x == a)).and_then(|i| lay.cells.get(i).copied())
+    } else {
+        None
+    };
+    let mut visible_ids = HashSet::new();
+    let mut visited = 0u64;
+    egui::ScrollArea::vertical().id_salt("grid-scroll").auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
+        let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), total_h), Sense::hover());
+        let origin = area.min;
+        app.grid_scroll = Some(viewport.top());
+        // deferred tap detection: needs the scroll origin to map cell rects to screen space.
+        // On touch release egui-winit sends `PointerGone`, so `latest_pos` is already None;
+        // `interact_pos` still holds the release position.
+        if was_released && !multi_was_active {
+            let release_pos = ui.input(|i| i.pointer.interact_pos());
+            let drag_dist_sq = press_origin.and_then(|o| release_pos.map(|p| (p.x - o[0]).powi(2) + (p.y - o[1]).powi(2)));
+            let threshold = 6.0_f32.powi(2);
+            let is_tap = !drag_dist_sq.is_some_and(|d| d > threshold);
+            if let (true, Some(press_pos), Some(release_pos)) = (is_tap, press_origin, release_pos) {
+                let origin = origin.to_vec2();
+                let pcell =
+                    lay.cells.iter().enumerate().find_map(|(i, r)| r.translate(origin).contains(pos2(press_pos[0], press_pos[1])).then_some(ids[i]));
                 if let Some(pcell) = pcell {
-                    // only fire if pointer is still over the same cell
-                    if lay.cells.iter().enumerate().any(|(i, r)| ids[i] == pcell && r.translate(full.min.to_vec2()).contains(hover_pos)) {
+                    // only fire if the pointer is still over the same cell
+                    if lay.cells.iter().enumerate().any(|(i, r)| ids[i] == pcell && r.translate(origin).contains(release_pos)) {
                         if is_touch {
                             // a single tap on a touch screen opens the photo like Lightroom mobile
                             let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
@@ -301,20 +312,6 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 }
             }
         }
-    }
-    // bring the active photo into view when it changes (keyboard, click, command) or the grid
-    // comes back on screen; otherwise the scroll position is the user's
-    let scroll_to: Option<Rect> = if follow_active(ui.ctx(), egui::Id::new("grid-follow-active"), active) {
-        active.and_then(|a| ids.iter().position(|x| *x == a)).and_then(|i| lay.cells.get(i).copied())
-    } else {
-        None
-    };
-    let mut visible_ids = HashSet::new();
-    let mut visited = 0u64;
-    egui::ScrollArea::vertical().id_salt("grid-scroll").auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
-        let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), total_h), Sense::hover());
-        let origin = area.min;
-        app.grid_scroll = Some(viewport.top());
         if let Some(r) = scroll_to {
             ui.scroll_to_rect(r.translate(origin.to_vec2()), None);
         }
