@@ -138,6 +138,57 @@ fn for_targets(s: &mut Session, p: &Value, label: &str, f: impl Fn(PhotoId) -> O
     Ok(json!({"changed": n}))
 }
 
+/// The key shared by a photo and its same-folder, same-name siblings with another extension:
+/// `(folder, lowercased file name without extension)`. Videos and photos without a file folder
+/// (demo scenes) have none.
+fn variant_key(photo: &lightcraft_catalog::Photo) -> Option<(String, String)> {
+    if photo.kind == lightcraft_catalog::MediaKind::Video {
+        return None;
+    }
+    let folder = lightcraft_catalog::folder_of(photo)?;
+    let stem = photo.file_name.rsplit_once('.').map_or(photo.file_name.as_str(), |(s, _)| s);
+    Some((folder, stem.to_lowercase()))
+}
+
+/// The targets plus, when [`Session::variant_sync`] is on, the same-folder photos with the same
+/// base name and another extension (x.jpg ↔ x.raw). Only library photos are added: never Local
+/// browsed records, Recently Deleted ones or videos.
+fn property_targets(s: &Session, p: &Value) -> Vec<PhotoId> {
+    let mut ids = s.targets(p);
+    if !s.variant_sync {
+        return ids;
+    }
+    let want: Vec<(String, String)> = ids.iter().filter_map(|id| s.catalog.photo(*id)).filter_map(|p| variant_key(p)).collect();
+    if want.is_empty() {
+        return ids;
+    }
+    for ph in s.catalog.photos() {
+        if ph.local || ph.deleted {
+            continue;
+        }
+        if let Some((folder, stem)) = variant_key(ph)
+            && want.iter().any(|(f, s)| *f == folder && *s == stem)
+        {
+            ids.push(ph.id);
+        }
+    }
+    ids.sort_unstable_by_key(|id| id.0);
+    ids.dedup();
+    ids
+}
+
+/// Apply one property op per target, expanded to the same-name files with another extension, as a
+/// single undo step.
+fn for_property_targets(s: &mut Session, p: &Value, label: &str, f: impl Fn(PhotoId) -> Option<Op>) -> Result<Value> {
+    let targets = property_targets(s, p);
+    let ops: Vec<Op> = targets.iter().filter_map(|id| f(*id)).collect();
+    let n = ops.len();
+    if n > 0 {
+        s.commit(label, Op::Batch { ops })?;
+    }
+    Ok(json!({"changed": n}))
+}
+
 fn advance_if(s: &mut Session, p: &Value) {
     if bool_or(p, "advance", false) {
         let _ = step(s, 1);
@@ -552,24 +603,24 @@ pub fn specs() -> Vec<CommandSpec> {
             if !(0..=5).contains(&r) {
                 return Err(bad("photo.rate", "rating must be 0..5"));
             }
-            let v = for_targets(s, p, "Set Rating", |id| Some(Op::SetRating { id, rating: r as u8 }))?;
+            let v = for_property_targets(s, p, "Set Rating", |id| Some(Op::SetRating { id, rating: r as u8 }))?;
             advance_if(s, p);
             Ok(v)
         }),
         cmd!("photo.flag", "Set Flag", ["Photo", "Set Flag"], None, "{flag: pick|reject|none, ids?, advance?: bool}", has_selection, |s, p| {
             let f = str_param(p, "flag").and_then(Flag::parse).ok_or_else(|| bad("photo.flag", "flag must be pick|reject|none"))?;
-            let v = for_targets(s, p, "Set Flag", |id| Some(Op::SetFlag { id, flag: f }))?;
+            let v = for_property_targets(s, p, "Set Flag", |id| Some(Op::SetFlag { id, flag: f }))?;
             advance_if(s, p);
             Ok(v)
         }),
         cmd!("photo.pick", "Flag as Pick", ["Photo", "Set Flag"], Some("P"), "{ids?}", has_selection, |s, p| {
-            for_targets(s, p, "Flag as Pick", |id| Some(Op::SetFlag { id, flag: Flag::Pick }))
+            for_property_targets(s, p, "Flag as Pick", |id| Some(Op::SetFlag { id, flag: Flag::Pick }))
         }),
         cmd!("photo.reject", "Flag as Reject", ["Photo", "Set Flag"], Some("X"), "{ids?}", has_selection, |s, p| {
-            for_targets(s, p, "Flag as Reject", |id| Some(Op::SetFlag { id, flag: Flag::Reject }))
+            for_property_targets(s, p, "Flag as Reject", |id| Some(Op::SetFlag { id, flag: Flag::Reject }))
         }),
         cmd!("photo.unflag", "Unflag", ["Photo", "Set Flag"], Some("U"), "{ids?}", has_selection, |s, p| {
-            for_targets(s, p, "Unflag", |id| Some(Op::SetFlag { id, flag: Flag::None }))
+            for_property_targets(s, p, "Unflag", |id| Some(Op::SetFlag { id, flag: Flag::None }))
         }),
         cmd!(
             "photo.label",
@@ -583,7 +634,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     None | Some("none") => None,
                     Some(x) => Some(ColorLabel::parse(x).ok_or_else(|| bad("photo.label", "unknown label"))?),
                 };
-                for_targets(s, p, "Set Color Label", |id| Some(Op::SetLabel { id, label: l }))
+                for_property_targets(s, p, "Set Color Label", |id| Some(Op::SetLabel { id, label: l }))
             }
         ),
         // ---- orientation

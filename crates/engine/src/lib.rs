@@ -136,6 +136,9 @@ pub struct Session {
     /// Auto Sync: edits to the active photo also change the other selected photos (the settings
     /// that changed, nothing else).
     pub auto_sync: bool,
+    /// Flags, ratings and colour labels set on a photo also change the photos in its folder with
+    /// the same base name and another extension (x.jpg ↔ x.raw). Persisted in `prefs.json`.
+    pub variant_sync: bool,
     pub catalog: Catalog,
     pub source: LibrarySource,
     pub filter: Filter,
@@ -249,6 +252,7 @@ impl Session {
     pub fn new() -> Session {
         Session {
             auto_sync: false,
+            variant_sync: true,
             catalog: Catalog::new(),
             source: LibrarySource::All,
             filter: Filter::default(),
@@ -809,5 +813,7 @@ mod tests_segment;
 mod tests_settings_files;
 #[cfg(test)]
 mod tests_spots;
+#[cfg(test)]
+mod tests_variants;
 #[cfg(test)]
 mod tests_xmp;

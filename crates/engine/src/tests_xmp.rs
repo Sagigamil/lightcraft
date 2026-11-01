@@ -896,6 +896,8 @@ fn files_sharing_a_stem_get_their_own_sidecars() {
     let (j, p) = (id(&s, "IMG_1.jpg"), id(&s, "IMG_1.png"));
     assert_eq!(s.sidecar_naming(j), crate::sidecar::SidecarNaming::Stem);
     assert_eq!(s.sidecar_naming(p), crate::sidecar::SidecarNaming::Full);
+    // this test is about independent sidecars, not the same-name property sync
+    s.execute("library.preferences", &json!({"variantSync": false})).unwrap();
     s.execute("photo.rate", &json!({"ids": [j.0], "rating": 2})).unwrap();
     s.execute("photo.rate", &json!({"ids": [p.0], "rating": 5})).unwrap();
     let r = s.execute("photo.saveMetadataToFile", &json!({"ids": [j.0, p.0]})).unwrap();

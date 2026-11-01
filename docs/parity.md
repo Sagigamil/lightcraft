@@ -22,7 +22,7 @@ and prints the summary; `cargo xtask parity --write` refreshes the summary table
 | Section | ✅ | 🟡 | ⬜ | 🚫 | P0 done | P1 done |
 |---|---:|---:|---:|---:|---:|---:|
 | A. Import (IMP) | 11 | 3 | 1 | 1 | 3/5 (60%) | 5/5 (100%) |
-| B. Library management (LIB) | 22 | 2 | 1 | 2 | 9/9 (100%) | 9/9 (100%) |
+| B. Library management (LIB) | 23 | 2 | 1 | 2 | 9/9 (100%) | 10/10 (100%) |
 | C. Views & navigation (VIEW) | 15 | 1 | 1 | 0 | 8/9 (89%) | 4/4 (100%) |
 | D. Search & filter (FILT) | 11 | 1 | 1 | 0 | 4/4 (100%) | 4/4 (100%) |
 | E. Metadata (META) | 5 | 1 | 0 | 0 | 2/2 (100%) | 2/2 (100%) |
@@ -48,9 +48,9 @@ and prints the summary; `cargo xtask parity --write` refreshes the summary table
 | Y. Menus | 81 | 0 | 4 | 8 | 47/47 (100%) | 23/23 (100%) |
 | Z. Keyboard shortcuts (desktop) | 75 | 3 | 3 | 1 | 49/52 (94%) | 23/24 (96%) |
 | Lightroom Classic extras | 32 | 11 | 39 | 9 | — | 22/24 (92%) |
-| **Total** | 392 | 35 | 86 | 36 | 193/200 (97%) | 142/152 (93%) |
+| **Total** | 393 | 35 | 86 | 36 | 193/200 (97%) | 143/153 (93%) |
 
-Weighted completion (✅ = 1, 🟡 = ½, 🚫 left out): **79.8%** of 513 in-scope rows — P0 98.2% of 200 · P1 95.7% of 152 · P2 41.6% of 160.
+Weighted completion (✅ = 1, 🟡 = ½, 🚫 left out): **79.9%** of 514 in-scope rows — P0 98.2% of 200 · P1 95.8% of 153 · P2 41.6% of 160.
 <!-- /parity:summary -->
 
 ## Top gaps
@@ -157,6 +157,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-LIB-RATING | Star ratings | P0 | ✅ | `cmd:photo.rate` (`advance`), `crates/ui-egui/src/shortcuts.rs` | 0 clears; 1–5 set; Shift+0–5 applies and advances once, including with Auto Advance. Batch grid and undo/redo regressions; macOS native ownership corrected (PR #261) |
 | LR-LIB-FLAG | Pick / reject flags | P0 | ✅ | `cmd:photo.pick`, `cmd:photo.reject`, `cmd:photo.unflag`, `cmd:photo.flag` | P pick, X reject, U clear; Shift+P picks and advances in both grids (Presets elsewhere); Shift+X/U and legacy Shift+Z advance; no flag cycle; rejection does not delete the file |
 | LR-LIB-LABEL | Colour labels | P1 | ✅ | `cmd:photo.label`, `cmd:label.setNames`, `cmd:label.names`, `cmd:dialog.labelNames`, keys 6–9 in `crates/ui-egui/src/shortcuts.rs` | Photo menu and grid context menu (coloured, named), Info-panel swatches, label dot plus translucent colour on square-grid/filmstrip surrounds and photo-grid footers (photo pixels unchanged); colour-label toasts have pale matching backgrounds; setting/clearing through keys (including Shift), menus or Info swatches shows the same bottom toast as ratings, with the colour/custom name; editable label names (undoable, journaled); no purple key (as in Lightroom), no custom extra labels |
+| LR-LIB-VARIANTS | Same-name file variants | P1 | ✅ | `cmd:photo.rate`, `cmd:photo.flag`, `cmd:photo.label`, `cmd:library.preferences` (`variantSync`), `crates/engine/src/cmd/library.rs` | flags, ratings and colour labels set on x.jpg also reach the same-folder files with the same base name and another extension (x.raw, x.png); on by default, Settings → General toggle, saved in prefs.json; develop edits and metadata are never copied; videos, Local records and Recently Deleted photos are skipped |
 | LR-LIB-KEYWORD | Keywords | P0 | ✅ | `cmd:panel.keywords`, `cmd:photo.setMeta` (`addKeywords`/`removeKeywords`), `cmd:keyword.list`, `cmd:keyword.rename`, `cmd:keyword.delete`, `cmd:keyword.merge`, `cmd:keyword.suggest`, `crates/catalog/src/keywords.rs`, `crates/ui-egui/src/panels/left.rs` | left-panel keyword tree with counts (click filters, children included; context menu rename / merge / delete / add / remove); library-wide ops are one undo step and replay from the op log; suggestions (co-occurring / most used / completions) in the Keywords panel; no keyword drag-and-drop |
 | LR-LIB-PEOPLE | People / faces | P2 | 🟡 | `cmd:view.people`, `cmd:view.faceBoxes`, `cmd:photo.removeRegion`, `cmd:photo.setRegion`, `cmd:library.filter`, `crates/ui-egui/src/panels/people.rs`, `crates/catalog/src/query.rs` (`people`), `crates/engine/src/media.rs` (`face_job`), `crates/meta/src/xmp.rs` | MVP: named face regions read from XMP (MWG-RS, read-only, see `docs/xmp-interop.md`; clipped to the photo; Lightroom's `Rotation` of ±π/2 and π handled, mirrored orientations taken as written; boxes follow Rotate Left/Right and flips; a sidecar stating `mwg-rs:Regions`, even empty, replaces the photo's on re-read, one without leaves them) become cards in the People view (View ▸ People, or the People button in the toolbar): a close-up of the person's largest face, name and photo count; a click filters the grid (`person` in `library.filter`, `person:` search token, filter chip). Face boxes in the loupe can be switched off (View ▸ Face Boxes, toolbar) resized with eight drag handles and removed with the × shown on hover (catalog-only and undoable, one undo step per drag; the sidecar is never rewritten for either); no moving a box by dragging it yet. No face detection, no unnamed people / suggestions, no manual tagging, no writing regions back |
 | LR-LIB-STACK | Stacks | P1 | ✅ | `cmd:stack.group`, `cmd:stack.ungroup`, `cmd:stack.toggle`, `cmd:stack.setTop`, `cmd:stack.remove`, `cmd:stack.auto`, `crates/catalog/src/stacks.rs` | grid/filmstrip count badges, expand/collapse, auto-stack by capture time; no visual-similarity auto-stack |
