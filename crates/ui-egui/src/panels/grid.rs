@@ -170,6 +170,8 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         super::filterbar::show(app, ui);
     }
     app.canvas_rect = Some(ui.max_rect());
+    let full = ui.max_rect();
+    handle_pinch_zoom(app, ui, full);
     if ids.is_empty() {
         if !chips.is_empty() {
             let body = match total {
@@ -755,6 +757,21 @@ pub fn drag_feedback(app: &mut LightcraftApp, ctx: &egui::Context) {
             );
         });
     });
+}
+
+fn handle_pinch_zoom(app: &mut LightcraftApp, ui: &mut egui::Ui, _full: Rect) {
+    let factor = ui.input(|i| i.zoom_delta());
+    if !factor.is_finite() || factor <= 0.0 || (factor - 1.0).abs() < 0.01 {
+        return;
+    }
+    const MIN: f32 = 90.0;
+    const MAX: f32 = 480.0;
+    let new_size = (app.ui.thumb_size * factor).clamp(MIN, MAX);
+    if (new_size - app.ui.thumb_size).abs() < 0.5 {
+        return;
+    }
+    app.ui.thumb_size = new_size;
+    ui.ctx().request_repaint();
 }
 
 pub use super::filterbar::label_color;
