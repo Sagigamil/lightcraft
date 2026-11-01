@@ -172,6 +172,20 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     app.canvas_rect = Some(ui.max_rect());
     let full = ui.max_rect();
     handle_pinch_zoom(app, ui, full);
+    // global tap-vs-scroll: intercept press before ScrollArea claims it.
+    // Track which cell (if any) received the pointer press. On release, if the
+    // pointer is still over the same cell and barely moved, it's a tap -> select.
+    let press_key = egui::Id::new("grid-press");
+    if ui.input(|i| i.pointer.any_pressed()) {
+        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+            ui.ctx().data_mut(|d| d.insert_temp(press_key, [pos.x, pos.y]));
+        }
+    }
+    let press_origin: Option<[f32; 2]> = ui.ctx().data(|d| d.get_temp(press_key));
+    let was_released = ui.input(|i| i.pointer.any_released());
+    if was_released {
+        ui.ctx().data_mut(|d| d.remove::<[f32; 2]>(press_key));
+    }
     if ids.is_empty() {
         if !chips.is_empty() {
             let body = match total {
@@ -225,6 +239,46 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let stacks = app.caches.grid.stacks(stats, &app.session.catalog, generation);
     let total_h = lay.height + 12.0;
     let active = app.session.selection.active;
+    // handle deferred tap detection (needs lay to check cell rects)
+    if was_released {
+        let latest_pos = ui.input(|i| i.pointer.latest_pos());
+        let drag_dist_sq = press_origin.and_then(|o| latest_pos.map(|p| (p.x - o[0]).powi(2) + (p.y - o[1]).powi(2)));
+        let threshold = 6.0_f32.powi(2);
+        let is_tap = !drag_dist_sq.is_some_and(|d| d > threshold);
+        if is_tap && press_origin.is_some() && latest_pos.is_some() {
+            // find which cell the press started on and the current hover cell
+            if let (Some(press_pos), Some(hover_pos)) = (press_origin, latest_pos) {
+                let pcell = lay.cells.iter().enumerate().find_map(|(i, r)| {
+                    r.translate(full.min.to_vec2()).contains(pos2(press_pos[0], press_pos[1])).then_some(ids[i])
+                });
+                if let Some(pcell) = pcell {
+                    // only fire if pointer is still over the same cell
+                    if lay.cells.iter().enumerate().any(|(i, r)| {
+                        ids[i] == pcell && r.translate(full.min.to_vec2()).contains(hover_pos)
+                    }) {
+                        let modifiers = ui.ctx().input(|i| i.modifiers);
+                        if !app.session.selection.contains(pcell) && modifiers.is_none() {
+                            let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
+                        } else if modifiers.shift {
+                            let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "range"}));
+                        } else if modifiers.command || modifiers.ctrl {
+                            let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "toggle"}));
+                        } else if !app.session.selection.contains(pcell) {
+                            let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
+                        }
+                        let elapsed = web_time::Instant::now().elapsed().as_secs_f64();
+                        let last: Option<(PhotoId, f64)> = ui.ctx().data(|d| d.get_temp(egui::Id::new("cell-dblclick")));
+                        let dbl = last.is_some_and(|(was, when)| was == pcell && elapsed - when < 0.5);
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("cell-dblclick"), (pcell, elapsed)));
+                        if dbl {
+                            let _ = app.run("library.select", json!({"ids": [pcell.0]}));
+                            let _ = app.run("view.detail", json!({}));
+                        }
+                    }
+                }
+            }
+        }
+    }
     // bring the active photo into view when it changes (keyboard, click, command) or the grid
     // comes back on screen; otherwise the scroll position is the user's
     let scroll_to: Option<Rect> = if follow_active(ui.ctx(), egui::Id::new("grid-follow-active"), active) {
@@ -627,9 +681,8 @@ fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square
     if photo.flag == Flag::Reject {
         p.rect_filled(img_rect, 0.0, Color32::from_black_alpha(110));
     }
-    // interaction
+    // keyword painting (still per-cell)
     if let Some(k) = app.ui.keyword_painter.clone() {
-        // painting: a click toggles the keyword on this photo
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
@@ -640,44 +693,7 @@ fn cell(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, r: Rect, square
         }
         return;
     }
-    // interaction: use Sense::hover so the ScrollArea always gets first chance at pointer
-    // events (scrolling works). On release, detect tap vs drag using movement distance.
-    let hovered = resp.hovered();
-    let pressed = hovered && ui.input(|i| i.pointer.any_pressed());
-    let released = ui.input(|i| i.pointer.any_released());
-    let key = egui::Id::new("cell-press");
-    if pressed {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            ui.ctx().data_mut(|d| d.insert_temp::<Option<[f32; 2]>>(key, Some([pos.x, pos.y])));
-        }
-    }
-    let press_origin: Option<[f32; 2]> = ui.ctx().data(|d| d.get_temp::<Option<[f32; 2]>>(key)).flatten();
-    let latest_pos = ui.input(|i| i.pointer.latest_pos());
-    let drag_dist_sq = press_origin.and_then(|o| latest_pos.map(|p| (p.x - o[0]).powi(2) + (p.y - o[1]).powi(2)));
-    let threshold = 6.0_f32.powi(2);
-    let is_tap = drag_dist_sq.is_some_and(|d| d <= threshold);
-    if released && is_tap && press_origin.is_some() {
-        // tap: select (or range/toggle with modifiers)
-        let modifiers = ui.ctx().input(|i| i.modifiers);
-        if !app.session.selection.contains(id) && modifiers.is_none() {
-            let _ = app.run("library.select", json!({"ids": [id.0], "mode": "replace"}));
-        } else if modifiers.shift {
-            let _ = app.run("library.select", json!({"ids": [id.0], "mode": "range"}));
-        } else if modifiers.command || modifiers.ctrl {
-            let _ = app.run("library.select", json!({"ids": [id.0], "mode": "toggle"}));
-        } else if !app.session.selection.contains(id) {
-            let _ = app.run("library.select", json!({"ids": [id.0], "mode": "replace"}));
-        }
-        // double-click: enter detail view
-        let elapsed = web_time::Instant::now().elapsed().as_secs_f64();
-        let last: Option<(PhotoId, f64)> = ui.ctx().data(|d| d.get_temp(egui::Id::new("cell-dblclick")));
-        let dbl = last.is_some_and(|(was, when)| was == id && elapsed - when < 0.5);
-        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("cell-dblclick"), (id, elapsed)));
-        if dbl {
-            let _ = app.run("library.select", json!({"ids": [id.0]}));
-            let _ = app.run("view.detail", json!({}));
-        }
-    }
+    // tap/click/drag are handled globally in show_inner via pointer tracking
     resp.context_menu(|ui| context_menu(app, ui, id));
 }
 
