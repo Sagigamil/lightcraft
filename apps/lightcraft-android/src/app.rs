@@ -105,6 +105,8 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
         inner.ui.settings.memory_mb = 512;
         inner.ui.settings.preview_edge = 2048;
     }
+    let destination = bridge.call(json!({"op":"exportDestination"}))?;
+    super::storage::set_export_destination(&mut inner, destination.get("value").and_then(Value::as_str).unwrap_or_default());
     let mut options = eframe::NativeOptions { android_app: Some(android), ..Default::default() };
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
         setup.device_descriptor = Arc::new(|adapter| eframe::wgpu::DeviceDescriptor {
@@ -220,9 +222,7 @@ impl App {
                             let _ = self.inner.run("view.back", json!({}));
                         }
                         "destination" => {
-                            if let Some(lightcraft_ui_egui::state::Dialog::Export { dir, .. }) = &mut self.inner.ui.dialog {
-                                *dir = event.get("value").and_then(Value::as_str).unwrap_or_default().into();
-                            }
+                            super::storage::set_export_destination(&mut self.inner, event.get("value").and_then(Value::as_str).unwrap_or_default());
                         }
                         _ => self.inner.toast(ctx, event.get("value").and_then(Value::as_str).unwrap_or_default()),
                     }
@@ -341,7 +341,7 @@ impl eframe::App for App {
                     self.request(&ctx, json!({"op":"refresh", "recursive":self.recursive}));
                 }
                 ui.checkbox(&mut self.recursive, "Subfolders");
-                if ui.button("Export Folder").clicked() {
+                if ui.button("Choose Export Folder").clicked() {
                     self.request(&ctx, json!({"op":"destination"}));
                 }
                 if ui.button("Use Source Folder").clicked() {

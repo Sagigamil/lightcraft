@@ -17,6 +17,20 @@ pub fn export_name(path: &str) -> Result<&str, String> {
     Ok(name)
 }
 
+/// Apply the destination returned by the Android folder picker.
+pub fn set_export_destination(app: &mut lightcraft_ui_egui::LightcraftApp, destination: &str) {
+    // The shared dialog and Export with Previous read last_export. Android's
+    // persisted destination is authoritative even when no dialog is open.
+    let previous = app.session.last_export.get_or_insert_with(|| serde_json::json!({}));
+    if !previous.is_object() {
+        *previous = serde_json::json!({});
+    }
+    previous["dir"] = serde_json::json!(destination);
+    if let Some(lightcraft_ui_egui::state::Dialog::Export { dir, .. }) = &mut app.ui.dialog {
+        *dir = destination.into();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -35,5 +49,29 @@ mod tests {
         assert!(export_name("../..").is_err());
         assert!(export_name("").is_err());
         assert!(export_name("photo\0.jpg").is_err());
+    }
+
+    #[test]
+    fn toolbar_destination_is_used_when_export_dialog_opens_later() {
+        let mut app = lightcraft_ui_egui::LightcraftApp::new(lightcraft_engine::Session::new(), Default::default());
+        app.session.last_export = Some(serde_json::json!({"dir":"old-folder", "quality":73}));
+        set_export_destination(&mut app, "content://provider/tree/exports");
+        app.run("dialog.export", serde_json::json!({})).unwrap();
+        let Some(lightcraft_ui_egui::state::Dialog::Export { dir, .. }) = &app.ui.dialog else { panic!("export dialog missing") };
+        assert_eq!(dir, "content://provider/tree/exports");
+        assert_eq!(app.session.last_export.as_ref().unwrap()["quality"], 73);
+    }
+
+    #[test]
+    fn destination_updates_open_dialog_and_subsequent_exports() {
+        let mut app = lightcraft_ui_egui::LightcraftApp::new(lightcraft_engine::Session::new(), Default::default());
+        app.run("dialog.export", serde_json::json!({})).unwrap();
+        set_export_destination(&mut app, "content://provider/tree/new");
+        let Some(lightcraft_ui_egui::state::Dialog::Export { dir, .. }) = &app.ui.dialog else { panic!("export dialog missing") };
+        assert_eq!(dir, "content://provider/tree/new");
+        app.ui.dialog = None;
+        app.run("dialog.export", serde_json::json!({})).unwrap();
+        let Some(lightcraft_ui_egui::state::Dialog::Export { dir, .. }) = &app.ui.dialog else { panic!("export dialog missing") };
+        assert_eq!(dir, "content://provider/tree/new");
     }
 }

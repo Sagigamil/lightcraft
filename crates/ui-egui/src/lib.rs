@@ -837,6 +837,7 @@ impl LightcraftApp {
             panels::notices::show(self, &ctx);
             panels::dialogs::show(self, &ctx);
             panels::library_problem::show(self, &ctx);
+            export_task::poll(self, &ctx);
             panels::toast(self, &ctx);
             panels::edit::wheel_pointer_frame_end(&ctx);
             self.widgets = widgets::take_registry(&ctx);

@@ -715,6 +715,21 @@ mod tests {
         assert!(last["files"][0]["width"].as_u64().is_some_and(|w| w <= 64));
     }
 
+    #[test]
+    fn fullscreen_reports_completed_background_export() {
+        let mut h = demo([1200.0, 900.0]);
+        h.app.ui.fullscreen = true;
+        h.app.services.write_shared = Some(std::sync::Arc::new(|_, _| Ok(())));
+        crate::export_task::start(&mut h.app, vec![], Default::default(), Default::default()).unwrap();
+        let start = Instant::now();
+        while h.app.export.is_some() && start.elapsed() < Duration::from_secs(5) {
+            h.step();
+        }
+        assert!(h.app.export.is_none(), "fullscreen must consume export completion");
+        assert!(h.app.last_export_result.is_some(), "export result must be available");
+        assert!(h.app.ui.toast.is_some(), "export completion must be shown");
+    }
+
     /// Dragging grid photos onto an album row adds them to the album.
     #[test]
     fn drag_photos_onto_an_album() {
