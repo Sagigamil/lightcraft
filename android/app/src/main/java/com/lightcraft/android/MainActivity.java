@@ -74,6 +74,7 @@ public final class MainActivity extends NativeActivity {
             if (request == OPEN) scan(uri); else {
                 prefs.edit().putBoolean("createDocument", false).apply();
                 event("destination", uri.toString());
+                event("notice", "Export folder selected. Open File > Export to save photos.");
             }
         } catch (Exception e) { event("error", "Folder permission: " + e); }
     }
@@ -189,7 +190,11 @@ public final class MainActivity extends NativeActivity {
                 case "poll": { JSONArray a = new JSONArray(); JSONObject e; while ((e = events.poll()) != null) a.put(e); r.put("events", a); break; }
                 case "open": recursive = q.optBoolean("recursive"); picker(OPEN); break;
                 case "destination": picker(DESTINATION); break;
-                case "documentMode": prefs.edit().putBoolean("createDocument", true).apply(); event("notice", "Exports will use Android Save As"); break;
+                case "exportDestination": r.put("value", prefs.getBoolean("createDocument", false) ? "Android Save As" : prefs.getString("destination", "")); break;
+                case "documentMode":
+                    prefs.edit().putBoolean("createDocument", true).apply();
+                    event("destination", "Android Save As");
+                    event("notice", "Exports will use Android Save As"); break;
                 case "sourceDestination": {
                     String source = prefs.getString("source", "");
                     if (source.isEmpty()) throw new IOException("Open a folder first");

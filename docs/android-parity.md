@@ -11,3 +11,9 @@ Implemented and exercised:
 - ARM64 release packaging with SDK 29 minimum and target SDK 35.
 
 The APK is a testable implementation slice, not a claim that every desktop workflow has reached parity. Physical tablet validation is still required for stylus pressure, vendor-specific SAF providers, large RAW performance, rotation/insets, and GPU differences. The Android catalog currently reports a lock warning on some app-private filesystems; edits and export continue to work, but that storage behavior should be hardened before a production release.
+
+Export destination correction (2026-11-02): selecting a folder from the toolbar now
+updates both the current export dialog and subsequent exports. Startup restores
+the destination (or Save As mode) from Android preferences instead of relying on
+a previous export. Host regression tests cover selection before opening the dialog
+and reopening it after changing folders. Physical-device verification is pending.
