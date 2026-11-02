@@ -241,3 +241,62 @@ fn touch_on_an_open_menu_item_does_not_open_the_photo() {
     assert_ne!(h.app.ui.view, ViewMode::Detail, "a menu item tap opened the photo");
     assert!(h.app.session.selection.ids.len() > 1, "Select All still ran");
 }
+
+/// Deleting the active photo activates the next one (not the first) and leaves the grid
+/// scrollable where the user was.
+#[test]
+fn deleting_a_photo_keeps_the_grid_in_place_and_scrollable() {
+    let mut h = grid(ViewMode::PhotoGrid);
+    let vis = h.app.session.visible_cloned();
+    let target = vis[100];
+    select(&mut h, target);
+    h.settle(SETTLE);
+    let before = h.app.grid_scroll.unwrap_or(0.0);
+    let r = h.request("engine.execute", json!({"command": "photo.delete", "params": {"ids": [target.0]}}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(h.app.session.selection.active, Some(vis[101]), "the next photo is active");
+    h.settle(SETTLE);
+    let after = h.app.grid_scroll.unwrap_or(0.0);
+    assert!((after - before).abs() < 100.0, "the grid did not jump to the top ({before} -> {after})");
+    // and scrolling still works
+    h.request("ui.move", json!({"x": 400.0, "y": 400.0}), T);
+    let s0 = h.app.grid_scroll.unwrap_or(0.0);
+    h.request("ui.scroll", json!({"dy": -400.0}), T);
+    h.step();
+    let s1 = h.app.grid_scroll.unwrap_or(0.0);
+    assert_ne!(s1, s0, "the grid still scrolls after a delete ({s0} -> {s1})");
+}
+
+/// The user path: long-press/right-click a photo, choose Delete Photo. It deletes, activates the
+/// next photo, closes the menu and leaves the grid usable (scrollable).
+#[test]
+fn deleting_from_the_context_menu_keeps_the_grid_usable() {
+    let mut h = grid(ViewMode::PhotoGrid);
+    let r = h.request("ui.resize", json!({"width": 1200.0, "height": 2000.0}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    let vis = h.app.session.visible_cloned();
+    let target = vis[100];
+    select(&mut h, target);
+    h.settle(SETTLE);
+    let thumb = widget(&h, &format!("thumb:{}", target.0)).expect("thumb");
+    let r = h.request("ui.click", json!({"x": thumb.center().x, "y": thumb.center().y, "button": "right"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    let del = widget(&h, "context:delete").expect("Delete Photo in the context menu");
+    let p = del.center();
+    h.app.synthetic.push(press(p));
+    h.step();
+    h.app.synthetic.push(touch_start(p));
+    h.step();
+    h.app.synthetic.push(release(p));
+    h.step();
+    assert!(!h.app.session.visible().contains(&target), "the photo was deleted");
+    assert_eq!(h.app.session.selection.active, Some(vis[101]), "the next photo is active");
+    // the menu is closed and the grid still scrolls
+    h.request("ui.move", json!({"x": 400.0, "y": 400.0}), T);
+    let s0 = h.app.grid_scroll.unwrap_or(0.0);
+    h.request("ui.scroll", json!({"dy": -400.0}), T);
+    h.step();
+    assert_ne!(h.app.grid_scroll.unwrap_or(0.0), s0, "the grid still scrolls after the menu delete");
+}
