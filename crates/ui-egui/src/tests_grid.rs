@@ -204,3 +204,21 @@ fn touch_drag_does_not_open_detail_view() {
     h.step();
     assert_eq!(h.app.ui.view, ViewMode::PhotoGrid, "a drag scrolls instead of opening the photo");
 }
+
+/// Tapping a control drawn over/beside the grid (the bottom bar, the tool strip) must act on
+/// that control, not open the photo under it.
+#[test]
+fn touch_on_grid_chrome_does_not_open_the_photo() {
+    for id in ["button:copySettings", "icon:edit"] {
+        let mut h = grid(ViewMode::PhotoGrid);
+        let r = widget(&h, id).unwrap_or_else(|| panic!("no {id}"));
+        let p = r.center();
+        h.app.synthetic.push(press(p));
+        h.step();
+        h.app.synthetic.push(touch_start(p));
+        h.step();
+        h.app.synthetic.push(release(p));
+        h.step();
+        assert_ne!(h.app.ui.view, ViewMode::Detail, "a tap on {id} opened the photo");
+    }
+}

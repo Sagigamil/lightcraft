@@ -278,34 +278,39 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             let threshold = 6.0_f32.powi(2);
             let is_tap = !drag_dist_sq.is_some_and(|d| d > threshold);
             if let (true, Some(press_pos), Some(release_pos)) = (is_tap, press_origin, release_pos) {
-                let origin = origin.to_vec2();
-                let pcell =
-                    lay.cells.iter().enumerate().find_map(|(i, r)| r.translate(origin).contains(pos2(press_pos[0], press_pos[1])).then_some(ids[i]));
-                if let Some(pcell) = pcell {
-                    // only fire if the pointer is still over the same cell
-                    if lay.cells.iter().enumerate().any(|(i, r)| ids[i] == pcell && r.translate(origin).contains(release_pos)) {
-                        if is_touch {
-                            // a single tap on a touch screen opens the photo like Lightroom mobile
-                            let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
-                            let _ = app.run("view.detail", json!({}));
-                        } else {
-                            let modifiers = ui.ctx().input(|i| i.modifiers);
-                            if !app.session.selection.contains(pcell) && modifiers.is_none() {
+                // Work in content coordinates and require the tap to start and end inside the
+                // visible viewport: a press on the bottom bar, the tool strip or any other
+                // chrome beside/over the grid must not hit an off-screen cell under it.
+                let press = pos2(press_pos[0] - origin.x, press_pos[1] - origin.y);
+                let release = pos2(release_pos.x - origin.x, release_pos.y - origin.y);
+                if viewport.contains(press) && viewport.contains(release) {
+                    let pcell = lay.cells.iter().enumerate().find_map(|(i, r)| r.contains(press).then_some(ids[i]));
+                    if let Some(pcell) = pcell {
+                        // only fire if the pointer is still over the same cell
+                        if lay.cells.iter().enumerate().any(|(i, r)| ids[i] == pcell && r.contains(release)) {
+                            if is_touch {
+                                // a single tap on a touch screen opens the photo like Lightroom mobile
                                 let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
-                            } else if modifiers.shift {
-                                let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "range"}));
-                            } else if modifiers.command || modifiers.ctrl {
-                                let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "toggle"}));
-                            } else if !app.session.selection.contains(pcell) {
-                                let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
-                            }
-                            let now = ui.input(|i| i.time);
-                            let last: Option<(PhotoId, f64)> = ui.ctx().data(|d| d.get_temp(egui::Id::new("cell-dblclick")));
-                            let dbl = last.is_some_and(|(was, when)| was == pcell && now - when < 0.5);
-                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("cell-dblclick"), (pcell, now)));
-                            if dbl {
-                                let _ = app.run("library.select", json!({"ids": [pcell.0]}));
                                 let _ = app.run("view.detail", json!({}));
+                            } else {
+                                let modifiers = ui.ctx().input(|i| i.modifiers);
+                                if !app.session.selection.contains(pcell) && modifiers.is_none() {
+                                    let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
+                                } else if modifiers.shift {
+                                    let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "range"}));
+                                } else if modifiers.command || modifiers.ctrl {
+                                    let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "toggle"}));
+                                } else if !app.session.selection.contains(pcell) {
+                                    let _ = app.run("library.select", json!({"ids": [pcell.0], "mode": "replace"}));
+                                }
+                                let now = ui.input(|i| i.time);
+                                let last: Option<(PhotoId, f64)> = ui.ctx().data(|d| d.get_temp(egui::Id::new("cell-dblclick")));
+                                let dbl = last.is_some_and(|(was, when)| was == pcell && now - when < 0.5);
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("cell-dblclick"), (pcell, now)));
+                                if dbl {
+                                    let _ = app.run("library.select", json!({"ids": [pcell.0]}));
+                                    let _ = app.run("view.detail", json!({}));
+                                }
                             }
                         }
                     }
