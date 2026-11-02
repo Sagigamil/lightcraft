@@ -222,3 +222,22 @@ fn touch_on_grid_chrome_does_not_open_the_photo() {
         assert_ne!(h.app.ui.view, ViewMode::Detail, "a tap on {id} opened the photo");
     }
 }
+
+/// A tap on an open menu item over the grid must run the menu command, not open the photo.
+#[test]
+fn touch_on_an_open_menu_item_does_not_open_the_photo() {
+    let mut h = grid(ViewMode::PhotoGrid);
+    let r = h.request("ui.clickWidget", json!({"id": "menu:Edit"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    let item = widget(&h, "menu.item:library.selectAll").expect("Select All is in the open menu");
+    let p = item.center();
+    h.app.synthetic.push(press(p));
+    h.step();
+    h.app.synthetic.push(touch_start(p));
+    h.step();
+    h.app.synthetic.push(release(p));
+    h.step();
+    assert_ne!(h.app.ui.view, ViewMode::Detail, "a menu item tap opened the photo");
+    assert!(h.app.session.selection.ids.len() > 1, "Select All still ran");
+}

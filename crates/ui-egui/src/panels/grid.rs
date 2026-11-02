@@ -283,7 +283,11 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 // chrome beside/over the grid must not hit an off-screen cell under it.
                 let press = pos2(press_pos[0] - origin.x, press_pos[1] - origin.y);
                 let release = pos2(release_pos.x - origin.x, release_pos.y - origin.y);
-                if viewport.contains(press) && viewport.contains(release) {
+                // A menu, popup or dialog over the grid lives in a higher layer; a tap on it
+                // must act on that widget, not the photo underneath.
+                let grid_layer = ui.layer_id();
+                let on_grid = |p: egui::Pos2| ui.ctx().layer_id_at(p) == Some(grid_layer);
+                if viewport.contains(press) && viewport.contains(release) && on_grid(pos2(press_pos[0], press_pos[1])) && on_grid(release_pos) {
                     let pcell = lay.cells.iter().enumerate().find_map(|(i, r)| r.contains(press).then_some(ids[i]));
                     if let Some(pcell) = pcell {
                         // only fire if the pointer is still over the same cell
