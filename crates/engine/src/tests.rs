@@ -135,6 +135,27 @@ fn filters_and_delete_restore() {
 }
 
 #[test]
+fn deleting_a_photo_activates_the_next_one() {
+    let mut s = demo();
+    let vis = s.visible_cloned();
+    assert!(vis.len() > 4);
+    let target = vis[1];
+    s.execute("library.select", &json!({"ids": [target.0], "active": target.0})).unwrap();
+    s.execute("photo.delete", &json!({})).unwrap();
+    assert_eq!(s.selection.active, Some(vis[2]), "the next photo becomes active");
+    // the record stays in Recently Deleted; the file on disk is untouched
+    s.execute("library.source", &json!({"kind": "recentlyDeleted"})).unwrap();
+    assert!(s.visible().contains(&target), "the photo waits in Recently Deleted");
+    s.execute("library.source", &json!({"kind": "all"})).unwrap();
+    // deleting the last photo falls back to the previous one
+    let all = s.visible_cloned();
+    let (last, prev) = (*all.last().unwrap(), all[all.len() - 2]);
+    s.execute("library.select", &json!({"ids": [last.0], "active": last.0})).unwrap();
+    s.execute("photo.delete", &json!({})).unwrap();
+    assert_eq!(s.selection.active, Some(prev));
+}
+
+#[test]
 fn masks_crop_and_render() {
     let mut s = demo();
     s.execute("mask.add", &json!({"kind": "radial", "center": [0.5, 0.5]})).unwrap();

@@ -704,9 +704,17 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         // ---- delete / restore
         cmd!("photo.delete", "Delete Photo", ["Photo"], Some("Delete"), "{ids?} — moves to Recently Deleted", has_selection, |s, p| {
-            let v = for_targets(s, p, "Delete", |id| Some(Op::SetDeleted { id, deleted: true }))?;
+            // The photo that becomes active: the next one in view, else the previous (as in
+            // Lightroom). Taking `visible().first()` jumped back to the top of the grid.
+            let targets = s.targets(p);
             let vis = s.visible_cloned();
-            s.selection = vis.first().map(|f| Selection::single(*f)).unwrap_or_default();
+            let next = targets
+                .iter()
+                .filter_map(|t| vis.iter().position(|x| x == t))
+                .max()
+                .and_then(|i| vis.iter().skip(i + 1).chain(vis.iter().take(i).rev()).find(|x| !targets.contains(x)).copied());
+            let v = for_targets(s, p, "Delete", |id| Some(Op::SetDeleted { id, deleted: true }))?;
+            s.selection = next.map(Selection::single).unwrap_or_default();
             Ok(v)
         }),
         cmd!("photo.restore", "Restore", ["Photo"], None, "{ids?}", has_selection, |s, p| for_targets(s, p, "Restore", |id| Some(Op::SetDeleted {
