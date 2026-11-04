@@ -180,7 +180,7 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let touch_key = egui::Id::new("grid-touch-input");
     let pointer_pressed = ui.input(|i| i.pointer.any_pressed());
     let pointer_released = ui.input(|i| i.pointer.any_released());
-    let frame_touch = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Touch { .. })));
+    let is_touch = touch_input(ui, touch_key);
     let multi_touch = ui.input(|i| i.multi_touch().is_some());
     if pointer_pressed {
         if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
@@ -191,17 +191,12 @@ fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     if multi_touch {
         ui.ctx().data_mut(|d| d.insert_temp(multi_key, true));
     }
-    if frame_touch {
-        ui.ctx().data_mut(|d| d.insert_temp(touch_key, true));
-    }
     let press_origin: Option<[f32; 2]> = ui.ctx().data(|d| d.get_temp(press_key));
     let was_released = pointer_released;
     let multi_was_active: bool = ui.ctx().data(|d| d.get_temp(multi_key)).unwrap_or(false);
-    let is_touch = frame_touch || ui.ctx().data(|d| d.get_temp::<bool>(touch_key)).unwrap_or(false);
     if was_released {
         ui.ctx().data_mut(|d| d.remove::<[f32; 2]>(press_key));
         ui.ctx().data_mut(|d| d.remove::<bool>(multi_key));
-        ui.ctx().data_mut(|d| d.remove::<bool>(touch_key));
     }
     if ids.is_empty() {
         if !chips.is_empty() {
@@ -809,6 +804,38 @@ pub fn drag_feedback(app: &mut LightcraftApp, ctx: &egui::Context) {
             );
         });
     });
+}
+
+/// Is the user on a touch screen? Sticky between gestures: a frame with touch events switches to
+/// touch; a mouse hover, press or wheel without touch events switches back (touch-screen laptops).
+/// Frames without input, and releases, keep the last mode. It must not fall back to mouse on idle
+/// frames: egui hit-tests a press against the previous frame's widgets, so a cell that sensed drags
+/// on the idle frame before a touch would take the drag from the scroll area and the swipe would
+/// not scroll. Phones and tablets start in touch mode, so even the first swipe scrolls.
+fn touch_input(ui: &egui::Ui, key: egui::Id) -> bool {
+    let (touch, mouse) = ui.input(|i| {
+        let touch = i.events.iter().any(|e| matches!(e, egui::Event::Touch { .. }));
+        let buttons = i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { .. }));
+        let mouse = i.events.iter().any(|e| match e {
+            egui::Event::PointerMoved(_) => !buttons && !i.pointer.any_down(),
+            egui::Event::PointerButton { pressed, .. } => *pressed,
+            egui::Event::MouseWheel { .. } => true,
+            _ => false,
+        });
+        (touch, mouse)
+    });
+    let was = ui.ctx().data(|d| d.get_temp::<bool>(key)).unwrap_or(cfg!(any(target_os = "android", target_os = "ios")));
+    let now = if touch {
+        true
+    } else if mouse {
+        false
+    } else {
+        was
+    };
+    if now != was {
+        ui.ctx().data_mut(|d| d.insert_temp(key, now));
+    }
+    now
 }
 
 fn handle_pinch_zoom(app: &mut LightcraftApp, ui: &mut egui::Ui, _full: Rect) {
