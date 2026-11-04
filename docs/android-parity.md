@@ -7,6 +7,8 @@ Implemented and exercised:
 - SAF folder/file picking with persisted URI permissions, recursive discovery, and bounded stream materialization.
 - JPEG/PNG and RAW/DNG import through the shared source pipeline, non-destructive edits, catalog persistence, export, save-as, and Android sharing.
 - Touch/stylus viewer gestures for swipe navigation, long-press original preview, and tool-drag conflict handling.
+- Library grid: a swipe always scrolls (also when it starts on a photo after a pause), a tap opens the photo, a pinch resizes the thumbnails.
+- Detail view: the photo menu opens with a quick two-finger tap (a long press shows the original and no longer also opens the menu); right-click still works with a mouse.
 - Tablet toolbar actions, fullscreen, lifecycle/memory callbacks, and the loopback debug inspection endpoint.
 - ARM64 release packaging with SDK 29 minimum and target SDK 35.
 

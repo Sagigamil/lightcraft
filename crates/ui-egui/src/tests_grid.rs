@@ -431,3 +431,86 @@ fn deleting_from_the_context_menu_keeps_the_grid_usable() {
     h.step();
     assert_ne!(h.app.grid_scroll.unwrap_or(0.0), s0, "the grid still scrolls after the menu delete");
 }
+
+/// The detail view of the first photo, with a touch screen already seen.
+fn detail() -> (Headless, egui::Pos2) {
+    let mut h = grid(ViewMode::PhotoGrid);
+    let first = h.app.session.visible()[0];
+    select(&mut h, first);
+    let r = h.request("engine.execute", json!({"command": "view.detail"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    let c = h.app.image_rect.expect("photo drawn").center();
+    // egui learns there is a touch screen from a first touch elsewhere
+    let corner = h.app.canvas_rect.expect("canvas").left_top() + egui::vec2(4.0, 4.0);
+    finger_down(&mut h, corner);
+    finger_up(&mut h, corner);
+    for _ in 0..30 {
+        h.step();
+    }
+    // (on desktop builds that tap also click-zoomed)
+    let r = h.request("engine.execute", json!({"command": "view.zoomFit"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    (h, c)
+}
+
+fn menu_open(h: &Headless) -> bool {
+    widget(h, "context:delete").is_some()
+}
+
+/// A long press on the photo in the detail view (Android: shows the original) never opens the
+/// context menu.
+#[test]
+fn long_press_on_the_detail_photo_does_not_open_the_menu() {
+    let (mut h, c) = detail();
+    finger_down(&mut h, c);
+    for _ in 0..90 {
+        h.app.synthetic.extend([touch(0, egui::TouchPhase::Move, c), egui::Event::PointerMoved(c)]);
+        h.step();
+        assert!(!menu_open(&h), "the long press opened the menu");
+    }
+    finger_up(&mut h, c);
+    for _ in 0..5 {
+        h.step();
+    }
+    assert!(!menu_open(&h), "the menu opened after the long press");
+    assert_eq!(h.app.ui.view, ViewMode::Detail);
+}
+
+/// A quick two-finger tap on the photo opens its context menu; a tap elsewhere closes it again.
+#[test]
+fn two_finger_tap_on_the_detail_photo_opens_the_menu() {
+    let (mut h, c) = detail();
+    let zoom = h.app.ui.zoom;
+    let (a, b) = (c - egui::vec2(40.0, 0.0), c + egui::vec2(40.0, 0.0));
+    h.app.synthetic.extend([touch(0, egui::TouchPhase::Start, a), egui::Event::PointerMoved(a), press(a)]);
+    h.step();
+    h.app.synthetic.extend([touch(1, egui::TouchPhase::Start, b)]);
+    h.step();
+    h.app.synthetic.extend([touch(1, egui::TouchPhase::End, b)]);
+    h.step();
+    h.app.synthetic.extend([touch(0, egui::TouchPhase::End, a), release(a), egui::Event::PointerGone]);
+    h.step();
+    h.step();
+    assert!(menu_open(&h), "the two-finger tap opened the menu");
+    let del = widget(&h, "context:delete").expect("menu item");
+    assert!(del.left() >= c.x - 60.0 && del.top() >= c.y - 60.0, "the menu opens where the fingers were ({del:?}, {c:?})");
+    assert_eq!(h.app.ui.zoom, zoom, "the tap did not zoom {:?}", h.app.ui.zoom);
+    // a one-finger tap on the photo (outside the menu) closes it
+    let off = h.app.canvas_rect.expect("canvas").left_top() + egui::vec2(30.0, 30.0);
+    finger_down(&mut h, off);
+    finger_up(&mut h, off);
+    h.step();
+    assert!(!menu_open(&h), "a tap elsewhere closes the menu");
+}
+
+/// A right-click on the photo still opens the menu.
+#[test]
+fn right_click_on_the_detail_photo_opens_the_menu() {
+    let (mut h, c) = detail();
+    let r = h.request("ui.click", json!({"x": c.x, "y": c.y, "button": "right"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    assert!(menu_open(&h), "right-click opened the menu");
+}

@@ -474,7 +474,28 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     if let Some(why) = photo.preview_only.as_deref().filter(|_| !fullscreen) {
         preview_only_pill(ui, canvas, why);
     }
-    resp.context_menu(|ui| {
+    loupe_menu(app, ui, &resp, canvas, id);
+}
+
+/// The loupe's context menu. Mouse: right-click. Touch: a two-finger tap, because a long press
+/// shows the original (Android) and must not also open the menu.
+fn loupe_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Response, canvas: Rect, id: PhotoId) {
+    let at_key = egui::Id::new("loupe-menu-at");
+    let tap = app.touch.two_finger_tap.filter(|p| canvas.contains(*p) && ui.ctx().layer_id_at(*p) == Some(ui.layer_id()));
+    let right_click = resp.clicked_by(egui::PointerButton::Secondary).then(|| resp.interact_pointer_pos()).flatten();
+    let open = tap.or(right_click);
+    if let Some(p) = open {
+        ui.ctx().data_mut(|d| d.insert_temp(at_key, p));
+    }
+    let command = if open.is_some() {
+        Some(egui::SetOpenCommand::Bool(true))
+    } else if resp.clicked() {
+        Some(egui::SetOpenCommand::Bool(false))
+    } else {
+        None
+    };
+    let at = ui.ctx().data(|d| d.get_temp::<egui::Pos2>(at_key)).unwrap_or(canvas.center());
+    egui::Popup::context_menu(resp).open_memory(command).at_position(at).show(|ui| {
         ui.menu_button(crate::i18n::tr("Zoom"), |ui| {
             for (label, cmd) in [("Fit", "view.zoomFit"), ("100%", "view.zoom100"), ("Zoom In", "view.zoomIn"), ("Zoom Out", "view.zoomOut")] {
                 if ui.button(label).clicked() {
@@ -924,7 +945,9 @@ fn general_interaction(
     }
     // click toggles Fit ↔ the chosen click-zoom ratio at the clicked point; drag pans when zoomed
     let zoomed = img.width() > canvas.width() + 1.0 || img.height() > canvas.height() + 1.0;
-    if resp.double_clicked() || (!cfg!(target_os = "android") && resp.clicked() && !zoomed) {
+    // the click that ends a two-finger tap (it opens the menu) or a pinch is not a click-zoom
+    let clicked = !cfg!(target_os = "android") && resp.clicked() && !app.touch.multi;
+    if resp.double_clicked() || (clicked && !zoomed) {
         if let Some(q) = resp.interact_pointer_pos() {
             let u = ((q.x - img.left()) / img.width()).clamp(0.0, 1.0);
             let v = ((q.y - img.top()) / img.height()).clamp(0.0, 1.0);
@@ -932,7 +955,7 @@ fn general_interaction(
         }
         app.ui.zoom = if matches!(app.ui.zoom, Zoom::Fit) { Zoom::Percent(app.ui.click_zoom as f32) } else { Zoom::Fit };
         app.ui.zoom_anim = true;
-    } else if !cfg!(target_os = "android") && resp.clicked() && zoomed {
+    } else if clicked && zoomed {
         app.ui.zoom = Zoom::Fit;
         app.ui.zoom_anim = true;
     }

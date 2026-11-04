@@ -25,6 +25,7 @@ pub mod softpaint;
 pub mod state;
 pub mod tasks;
 pub mod theme;
+pub mod touch;
 pub mod widgets;
 
 #[cfg(test)]
@@ -191,6 +192,8 @@ pub struct LightcraftApp {
     /// Rect of the photo canvas and the displayed image (screen points) from the last frame.
     pub canvas_rect: Option<egui::Rect>,
     pub image_rect: Option<egui::Rect>,
+    /// Touch gestures egui does not recognise (two-finger tap), fed every frame.
+    pub touch: touch::TouchGestures,
     /// Scroll offsets (points) of the photo grid (vertical) and the filmstrip (horizontal) as
     /// drawn last (`ui.inspect` → `scroll`).
     pub grid_scroll: Option<f32>,
@@ -258,6 +261,7 @@ impl LightcraftApp {
             synthetic: vec![],
             synthetic_mods: egui::Modifiers::NONE,
             synthetic_mods_release: false,
+            touch: Default::default(),
             styled: false,
             font_language: i18n::Locale::En,
             fonts_ready: false,
@@ -773,8 +777,14 @@ impl LightcraftApp {
         }
     }
 
-    /// Inject synthetic events (pointer events one per frame; key sequences up to the release).
+    /// Inject synthetic events (pointer events one per frame; key sequences up to the release),
+    /// then recognise this frame's touch gestures.
     pub fn raw_input_hook(&mut self, raw: &mut egui::RawInput) {
+        self.inject_synthetic(raw);
+        self.touch.frame(raw.time.unwrap_or(self.last_time), &raw.events);
+    }
+
+    fn inject_synthetic(&mut self, raw: &mut egui::RawInput) {
         // the frame after a synthetic release / key: modifiers back up
         if std::mem::take(&mut self.synthetic_mods_release) && self.synthetic_mods != egui::Modifiers::NONE {
             self.synthetic_mods = egui::Modifiers::NONE;
