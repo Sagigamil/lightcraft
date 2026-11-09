@@ -217,7 +217,12 @@ fn a_moved_folder_keeps_a_chosen_subfolder_chosen() {
     add(&mut s, &format!("{day1}/b.jpg"));
     s.execute("library.filter", &json!({"libraryFolder": day1})).unwrap();
     s.execute("folder.move", &json!({"path": dir.path("trip"), "into": dir.path("archive")})).unwrap();
-    assert_eq!(s.filter.library_folder.as_deref(), Some(moved.as_str()), "the subfolder follows its parent");
+    // A move joins native path components; equivalent Windows separators may differ.
+    assert_eq!(
+        s.filter.library_folder.as_deref().map(lightcraft_catalog::query::folder_key),
+        Some(lightcraft_catalog::query::folder_key(&moved)),
+        "the subfolder follows its parent"
+    );
     assert_eq!(s.visible().len(), 1);
     s.execute("edit.undo", &json!({})).unwrap();
     assert_eq!(s.filter.library_folder.as_deref(), Some(day1.as_str()));
