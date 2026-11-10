@@ -150,6 +150,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("merge.hdrPanoramaLast", "HDR Panorama with Last Settings", None, "Photo>Photo Merge"),
     ("file.addPhotos", "Import Photos…", Some("Cmd+Shift+I"), "File"),
     ("file.addFolder", "Import from Folder…", None, "File"),
+    // an album's context menu / "+" button: {id: albumId, path?: folder}
+    ("album.importFolder", "Add Photos from Folder…", None, ""),
     ("file.importLightroom", "Import Lightroom Catalog…", None, "File"),
     ("file.addFromDevice", "Import from Device", None, ""),
     ("file.findMissing", "Find Missing Photos…", None, "File"),
@@ -1164,6 +1166,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 None => Ok(Value::Null),
             }
         }
+        "album.importFolder" => import_folder_into_album(app, p),
         "file.importPresets" => {
             let paths = match p.get("paths").and_then(Value::as_array) {
                 Some(a) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
@@ -1348,6 +1351,7 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
         "view.compare" => app.session.catalog.len() > 1,
         "view.fullScreenPreview" | "view.infoOverlay" | "view.navigator" => app.session.active().is_some() || app.ui.fullscreen,
         "app.openLibrary" | "file.addFolder" => app.services.pick_folder.is_some() && !crate::lightroom_import::is_running(app),
+        "album.importFolder" => can_import_folder_into_album(app),
         "file.backupLibrary" => app.services.backup_library.is_some(),
         "file.restoreLibrary" => app.services.restore_library.is_some(),
         "compare.swap" | "compare.makeSelect" => app.ui.view == ViewMode::Compare,
@@ -1356,6 +1360,40 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
         }
         _ => true,
     }
+}
+
+/// This platform can pick a folder for an album's Add Photos from Folder… (a folder dialog of
+/// ours, or the host's own picker) and no import is running.
+pub fn can_import_folder_into_album(app: &LightcraftApp) -> bool {
+    (app.services.pick_folder.is_some() || app.services.host_folder_import) && !crate::lightroom_import::is_running(app)
+}
+
+/// `album.importFolder {id, path?}`: import a folder's photos (subfolders included) into All
+/// Photos and into album `id`, photos the library already has too. Desktop: the folder (picked
+/// when no `path`) opens in the import review with the album chosen. A host with its own
+/// picker (Android) gets the request in [`crate::state::UiState::request_folder_import`].
+fn import_folder_into_album(app: &mut LightcraftApp, p: &Value) -> Result<Value, String> {
+    let id = p.get("id").and_then(Value::as_u64).ok_or("album.importFolder: missing album `id`")?;
+    match app.session.catalog.album(lightcraft_catalog::AlbumId(id)) {
+        None => return Err("album.importFolder: no such album".into()),
+        Some(a) if a.folder || a.is_smart() => return Err("album.importFolder: smart albums and folders can't hold photos".into()),
+        Some(_) => {}
+    }
+    let path = match p.get("path").and_then(Value::as_str) {
+        Some(x) => Some(x.to_string()),
+        None if app.services.pick_folder.is_some() => app.services.pick_folder.as_mut().and_then(|f| f()),
+        None if app.services.host_folder_import => {
+            app.ui.request_folder_import = Some(id);
+            return Ok(json!({"album": id, "requested": true}));
+        }
+        None => return Err("no folder dialog on this platform".into()),
+    };
+    let Some(path) = path else { return Ok(Value::Null) };
+    crate::import::open(app, vec![path])?;
+    if let Some(t) = &mut app.scan {
+        t.album = Some(id);
+    }
+    Ok(json!({"album": id, "scanning": true}))
 }
 
 #[derive(Clone, Debug, Serialize)]

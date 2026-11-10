@@ -7,6 +7,8 @@
   " · {} restored from Recently Deleted": " · 已从“最近删除”恢复 {} 张",
   ", {failed} file{} not readable": "，{failed} 个文件无法读取{0:.0}",
   "Add {local_n} to My Photos": "将 {local_n} 张照片添加到我的照片",
+  "Add {n} Photo{} to Album": "将 {n} 张照片添加到相册{:.0}",
+  "Added {n} photo{} already in the library to the album": "已将图库中的 {n} 张照片添加到相册{:.0}",
   "Add {} Photo{}": "添加 {0} 张照片{1:.0}",
   "Add {} Photo{}, restore {}": "添加 {0} 张照片{1:.0}，恢复 {2} 张",
   "Add “{}” to Favorites": "将“{0}”添加到收藏夹",

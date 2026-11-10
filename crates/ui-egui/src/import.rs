@@ -197,6 +197,28 @@ impl ImportDialog {
             o => Ok(Some(o.to_string())),
         }
     }
+    /// An album (existing or new) is chosen.
+    pub fn has_album(&self) -> bool {
+        self.album.is_some() || !self.new_album.trim().is_empty()
+    }
+    /// The library photos the duplicates among the candidates already are (not those in
+    /// Recently Deleted, nor ones checked to import again): with an album chosen they join it too,
+    /// so importing a folder into an album files every photo of the folder there.
+    pub fn existing_photos(&self, catalog: &lightcraft_catalog::Catalog) -> Vec<u64> {
+        let mut out = Vec::new();
+        for (i, c) in self.candidates.iter().enumerate() {
+            if c.duplicate.is_none() || self.checked.get(i).copied().unwrap_or(false) && self.importable(i) {
+                continue;
+            }
+            if let Some(id) = c.existing
+                && catalog.photo(lightcraft_catalog::PhotoId(id)).is_some_and(|p| !p.deleted)
+                && !out.contains(&id)
+            {
+                out.push(id);
+            }
+        }
+        out
+    }
     fn keywords(&self) -> Vec<String> {
         self.keywords.split(',').map(str::trim).filter(|k| !k.is_empty()).map(str::to_string).collect()
     }
@@ -387,6 +409,8 @@ pub struct ScanTask {
     rx: std::sync::mpsc::Receiver<ScanOutput>,
     /// Open the review with "copy into the library" checked (a camera / card).
     pub copy: bool,
+    /// Open the review with this album chosen (an album's Add Photos from Folder…).
+    pub album: Option<u64>,
     /// Browsing a folder (Local): the photos are read in place instead of opening the review.
     browse: bool,
     /// What is being scanned (the review's source).
@@ -410,7 +434,7 @@ pub fn open(app: &mut LightcraftApp, paths: Vec<String>) -> Result<Value, String
     std::thread::spawn(job);
     #[cfg(target_arch = "wasm32")]
     job();
-    app.scan = Some(ScanTask { progress, rx, copy: false, browse: false, sources });
+    app.scan = Some(ScanTask { progress, rx, copy: false, album: None, browse: false, sources });
     Ok(json!({"scanning": true}))
 }
 
@@ -471,7 +495,7 @@ pub fn browse(app: &mut LightcraftApp, path: &str, subfolders: Option<bool>) -> 
     std::thread::spawn(job);
     #[cfg(target_arch = "wasm32")]
     job();
-    app.scan = Some(ScanTask { progress, rx, copy: false, browse: true, sources: Vec::new() });
+    app.scan = Some(ScanTask { progress, rx, copy: false, album: None, browse: true, sources: Vec::new() });
     app.renderer.forget_imports();
     Ok(json!({"path": dir_s, "subfolders": subfolders, "scanning": true}))
 }
@@ -521,6 +545,7 @@ pub fn poll_scan(app: &mut LightcraftApp, ctx: &egui::Context) {
         })
         .collect();
     d.copy = task.copy;
+    d.album = task.album.filter(|a| app.session.catalog.album(lightcraft_catalog::AlbumId(*a)).is_some_and(|al| !al.folder && !al.is_smart()));
     d.sources = task.sources;
     app.ui.dialog = Some(crate::state::Dialog::Import { opts: Box::new(d) });
 }
@@ -566,7 +591,9 @@ impl ScanTask {
 /// Start importing the dialog's checked files (the dialog's OK / `ui.dialog.confirm`).
 pub fn start(app: &mut LightcraftApp, d: &ImportDialog) -> Result<Value, String> {
     let queue = d.selected_paths();
-    if queue.is_empty() {
+    // with an album chosen, the photos the library already has join it too
+    let existing = if d.has_album() { d.existing_photos(&app.session.catalog) } else { Vec::new() };
+    if queue.is_empty() && existing.is_empty() {
         return Err("no photos selected".into());
     }
     let undo0 = app.session.undo.len();
@@ -574,6 +601,26 @@ pub fn start(app: &mut LightcraftApp, d: &ImportDialog) -> Result<Value, String>
     if album.is_none() && !d.new_album.trim().is_empty() {
         let r = app.session.execute("album.create", &json!({"name": d.new_album.trim()})).map_err(|e| e.to_string())?;
         album = r["id"].as_u64();
+    }
+    if let Some(a) = album
+        && let Some(first) = existing.first()
+    {
+        // (album.addPhotos wants a selection: the imported photos replace it anyway)
+        let before = app.session.selection.clone();
+        app.session.selection = lightcraft_engine::Selection::single(lightcraft_catalog::PhotoId(*first));
+        let r = app.session.execute("album.addPhotos", &json!({"id": a, "ids": existing})).map_err(|e| e.to_string());
+        if queue.is_empty() {
+            app.session.selection = before;
+        }
+        r?;
+    }
+    if queue.is_empty() {
+        let steps = app.session.undo.len().saturating_sub(undo0);
+        app.session.merge_undo(steps, "Add to Album");
+        let n = existing.len();
+        let ctx = app.tasks.repaint.clone().unwrap_or_default();
+        app.toast(&ctx, crate::i18n::tr_format!("Added {n} photo{} already in the library to the album", if n == 1 { "" } else { "s" }, n = n));
+        return Ok(json!({"importing": 0, "addedToAlbum": n}));
     }
     let mode = match (d.copy, d.move_files) {
         (false, _) => "add",

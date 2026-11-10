@@ -17,6 +17,8 @@
   "; {outside} outside its time range": "; fuera de su intervalo de tiempo: {outside}",
   "@{}: {} PRs, {} commits, +{} / −{} lines (Δ {}), +{} / −{} binary assets, {} – {}": "@{}: {} PR, {} commits, +{} / −{} líneas (Δ {}), +{} / −{} recursos binarios, {} – {}",
   "Add {local_n} to My Photos": "Añadir {local_n} a Mis fotos",
+  "Add {n} Photo{} to Album": "Añadir {n} foto{} al álbum",
+  "Added {n} photo{} already in the library to the album": "{n} foto{0} de la biblioteca añadida{0} al álbum",
   "Add {} Photo{}": "Añadir {} foto{}",
   "Add {} Photo{}, restore {}": "Añadir {} foto{}, restaurar {}",
   "Add “{}” to Favorites": "Añadir “{}” a Favoritos",

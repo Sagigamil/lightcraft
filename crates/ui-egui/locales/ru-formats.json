@@ -19,6 +19,8 @@
   "; {outside} outside its time range": "; вне временного диапазона трека: {outside}",
   "@{}: {} PRs, {} commits, +{} / −{} lines (Δ {}), +{} / −{} binary assets, {} – {}": "@{}: PR: {}, коммитов: {}, строк: +{} / −{} (Δ {}), бинарных файлов: +{} / −{}, {} – {}",
   "Add {local_n} to My Photos": "Добавить в «Мои фото»: {local_n}",
+  "Add {n} Photo{} to Album": "Добавить в альбом фото: {n}{:.0}",
+  "Added {n} photo{} already in the library to the album": "Фото из библиотеки добавлено в альбом: {n}{:.0}",
   "Add {} Photo{}": "Добавить фото: {}{:.0}",
   "Add {} Photo{}, restore {}": "Добавить фото: {}{:.0}, восстановить: {}",
   "Add “{}” to Favorites": "Добавить «{}» в избранное",

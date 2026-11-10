@@ -7,6 +7,8 @@
   " · {} restored from Recently Deleted": "・最近削除した写真から{}枚を復元",
   ", {failed} file{} not readable": "、{failed}件を読み込めません{:.0}",
   "Add {local_n} to My Photos": "{local_n}枚をマイフォトに追加",
+  "Add {n} Photo{} to Album": "{n}枚の写真をアルバムに追加{:.0}",
+  "Added {n} photo{} already in the library to the album": "ライブラリにある{n}枚の写真をアルバムに追加しました{:.0}",
   "Add {} Photo{}": "{}枚の写真を追加{:.0}",
   "Add {} Photo{}, restore {}": "{}枚の写真を追加{:.0}、{}枚を復元",
   "Add “{}” to Favorites": "「{}」をお気に入りに追加",

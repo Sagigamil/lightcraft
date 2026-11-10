@@ -29,6 +29,8 @@ pub mod touch;
 pub mod widgets;
 
 #[cfg(test)]
+mod tests_album_import;
+#[cfg(test)]
 mod tests_curve;
 #[cfg(test)]
 mod tests_filmstrip;
@@ -117,6 +119,10 @@ pub struct Services {
     pub reveal: Option<RevealFn>,
     /// Choose a folder (Settings → General → Open Library…; desktop only).
     pub pick_folder: Option<PickFolder>,
+    /// The host has its own folder picker and import for an album's Add Photos from Folder…
+    /// (Android's Storage Access Framework): without `pick_folder`, the command then leaves the
+    /// album id in [`state::UiState::request_folder_import`] for the host to take.
+    pub host_folder_import: bool,
     /// Open a Lightroom Classic `.lrcat` catalog for read-only import.
     pub pick_lightroom_catalog: Option<PickFolder>,
     /// Open a web link in the browser (Help menu, About, Discord button).

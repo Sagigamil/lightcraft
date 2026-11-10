@@ -8,6 +8,8 @@
   " · {} restored from Recently Deleted": " · {} restaurada(s) de Excluídos recentemente",
   ", {failed} file{} not readable": ", {failed} arquivo{:.0} não legível",
   "Add {local_n} to My Photos": "Adicionar {local_n} a Minhas fotos",
+  "Add {n} Photo{} to Album": "Adicionar {n} foto{:.0} ao álbum",
+  "Added {n} photo{} already in the library to the album": "Adicionada {n} foto{:.0} da biblioteca ao álbum",
   "Add {} Photo{}": "Adicionar {} foto{:.0}",
   "Add {} Photo{}, restore {}": "Adicionar {} foto{:.0}, restaurar {}",
   "Add “{}” to Favorites": "Adicionar “{}” aos favoritos",

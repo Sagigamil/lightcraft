@@ -53,6 +53,23 @@ fn row_named(
     selected: bool,
     indent: f32,
 ) -> egui::Response {
+    row_trailing(app, ui, id, icon, label, spoken, count, selected, indent, 0.0).0
+}
+
+/// [`row_named`] that keeps `trailing` points free left of the count (the name is cut before
+/// them) and returns that room, for a button drawn over the row.
+fn row_trailing(
+    app: &mut LightcraftApp,
+    ui: &mut egui::Ui,
+    id: &str,
+    icon: Icon,
+    label: &str,
+    spoken: Option<&str>,
+    count: Option<usize>,
+    selected: bool,
+    indent: f32,
+    trailing: f32,
+) -> (egui::Response, Rect) {
     let label = if matches!(id, "all" | "recentlyAdded" | "picks" | "missing" | "recentlyDeleted") { crate::i18n::tr(label) } else { label };
     let t = Tokens::get(ui.ctx());
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 29.0), Sense::click());
@@ -85,8 +102,10 @@ fn row_named(
     let count_galley = count.filter(|_| app.ui.show_counts).map(|n| ui.painter().layout_no_wrap(n.to_string(), t.font(12.5), t.text_dim));
     let label_left = r.left() + 42.0 + indent;
     let count_left = count_galley.as_ref().map_or(edge - 18.0, |g| edge - 18.0 - g.size().x);
+    let slot_right = if count_galley.is_some() { count_left - 4.0 } else { count_left + 8.0 };
+    let slot = Rect::from_min_max(pos2(slot_right - trailing, r.top()), pos2(slot_right, r.bottom()));
     // the name gives way to the count: cut with an ellipsis, in full on hover
-    let room = count_left - 8.0 - label_left;
+    let room = count_left - 8.0 - label_left - trailing;
     let measure = |s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), color).size().x;
     let full_w = measure(label);
     let shown = if full_w <= room { label.to_string() } else { crate::widgets::elide_head(label, room.max(0.0), measure) };
@@ -102,9 +121,9 @@ fn row_named(
         register(ui.ctx(), format!("count:{id}"), rect);
         ui.painter().galley(rect.min, galley, t.text_dim);
     }
-    note_width(ui, needed);
+    note_width(ui, needed + trailing);
     let _ = app;
-    resp
+    (resp, slot)
 }
 
 /// A collapsible section header (Albums, Local, By Date, Keywords): the bold title with a
@@ -671,7 +690,27 @@ fn albums_tree(app: &mut LightcraftApp, ui: &mut egui::Ui, all: &[Album], parent
             let target =
                 app.session.target_album.filter(|t| app.session.catalog.album(*t).is_some()).or_else(|| app.session.catalog.quick_collection());
             let label = if target == Some(a.id) { format!("{} +", a.name) } else { a.name.clone() };
-            let mut resp = row(app, ui, &format!("album:{}", a.id.0), icon, &label, Some(n), sel, indent);
+            let row_id = format!("album:{}", a.id.0);
+            // a regular album, selected or under the pointer, shows "+" (Add Photos from Folder…);
+            // the row is placed at the cursor, so where it will be is known before it is drawn
+            let next = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 29.0));
+            let plus = !a.is_smart() && crate::menus::can_import_folder_into_album(app) && (sel || ui.rect_contains_pointer(next));
+            let (mut resp, slot) = row_trailing(app, ui, &row_id, icon, &label, None, Some(n), sel, indent, if plus { 26.0 } else { 0.0 });
+            if plus {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(slot).layout(egui::Layout::right_to_left(egui::Align::Center)));
+                let b = icon_button(
+                    &mut child,
+                    &format!("albumImportFolder:{}", a.id.0),
+                    Icon::Plus,
+                    vec2(24.0, 24.0),
+                    false,
+                    true,
+                    "Add Photos from Folder…",
+                );
+                if b.clicked() {
+                    import_folder_into(app, ui.ctx(), a.id.0);
+                }
+            }
             if !a.is_smart() {
                 drop_target(app, ui, &resp, a);
             }
@@ -706,8 +745,23 @@ fn drop_target(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Response
     }
 }
 
+/// An album's Add Photos from Folder… (its "+" or its menu): `album.importFolder`.
+fn import_folder_into(app: &mut LightcraftApp, ctx: &egui::Context, album: u64) {
+    if let Err(e) = app.run("album.importFolder", json!({"id": album})) {
+        app.toast(ctx, e);
+    }
+}
+
 fn folder_menu(app: &mut LightcraftApp, resp: &egui::Response, a: &Album) {
+    // (a long press counts as a right-click in egui, so on a tablet this opens on a long press)
     resp.context_menu(|ui| {
+        if !a.folder && !a.is_smart() && crate::menus::can_import_folder_into_album(app) {
+            let r = ui.button(crate::i18n::tr("Add Photos from Folder…"));
+            register(ui.ctx(), format!("context:albumImportFolder:{}", a.id.0), r.rect);
+            if r.clicked() {
+                import_folder_into(app, ui.ctx(), a.id.0);
+            }
+        }
         if !a.folder && !a.is_smart() && ui.button(crate::i18n::tr("Add Selected Photos")).clicked() {
             let _ = app.run("album.addPhotos", json!({"id": a.id.0}));
         }
