@@ -1007,3 +1007,51 @@ fn trashed_photo_ids(tag: &str) -> (Session, std::path::PathBuf, [u64; 1], u64) 
     let (s, src, id) = trashed_photo(tag);
     (s, src, [id], 0)
 }
+
+/// "Add Photos from Folder…" on an album: `library.import` with `album` puts every photo of the
+/// folder into the catalog (All Photos) and into the album, including the ones the library
+/// already had (skipped as duplicates by the import).
+#[test]
+fn importing_a_folder_into_an_album_adds_new_and_existing_photos() {
+    let src = temp_dir("into-album");
+    write_png(&src.join("a.png"), 1);
+    write_png(&src.join("b.png"), 2);
+    let img = lightcraft_raster::Rgba8 { width: 40, height: 24, data: (0..40 * 24).map(|i| [(i % 40 * 6) as u8, 90, 30, 255]).collect() };
+    let jpeg = lightcraft_codecs::encode_jpeg(
+        &lightcraft_codecs::EncodeImage::rgba8(&img),
+        90,
+        lightcraft_codecs::ChromaSubsampling::S444,
+        &lightcraft_codecs::EncodeMeta::default(),
+    )
+    .unwrap();
+    std::fs::write(src.join("c.jpg"), jpeg).unwrap();
+
+    let mut s = Session::new().with_fs();
+    // one photo is in the library before
+    let r = s.execute("library.import", &json!({"paths": [src.join("a.png").to_string_lossy()]})).unwrap();
+    let a = r["imported"][0].as_u64().unwrap();
+    let album = s.execute("album.create", &json!({"name": "Trip"})).unwrap()["id"].as_u64().unwrap();
+    s.execute("library.select", &json!({"ids": [a]})).unwrap();
+
+    let r = s.execute("library.import", &json!({"paths": [src.to_string_lossy()], "album": album})).unwrap();
+    assert_eq!(ids(&r, "imported"), 2, "{r}");
+    assert_eq!(ids(&r, "duplicates"), 1, "{r}");
+    assert_eq!(r["album"], album, "{r}");
+    assert_eq!(s.catalog.len(), 3, "all three are in All Photos");
+    let members = &s.catalog.album(lightcraft_catalog::AlbumId(album)).unwrap().photos;
+    assert_eq!(members.len(), 3, "new and existing photos are in the album: {members:?}");
+    assert!(members.contains(&lightcraft_catalog::PhotoId(a)));
+    let formats: Vec<String> = members.iter().filter_map(|id| s.catalog.photo(*id)).map(|p| p.file_name.to_lowercase()).collect();
+    assert!(formats.iter().any(|n| n.ends_with(".jpg")) && formats.iter().any(|n| n.ends_with(".png")), "{formats:?}");
+
+    // again: nothing new, nothing doubled, the selection stays
+    let before = s.selection.clone();
+    let r = s.execute("library.import", &json!({"paths": [src.to_string_lossy()], "album": album})).unwrap();
+    assert_eq!(ids(&r, "imported"), 0, "{r}");
+    assert_eq!(s.catalog.album(lightcraft_catalog::AlbumId(album)).unwrap().photos.len(), 3);
+    assert_eq!(s.selection, before);
+    // smart albums and folders can't take photos
+    let smart = s.execute("album.createSmart", &json!({"name": "Smart", "rules": {"rating": 3}})).unwrap()["id"].as_u64().unwrap();
+    assert!(s.execute("library.import", &json!({"paths": [src.to_string_lossy()], "album": smart})).is_err());
+    let _ = std::fs::remove_dir_all(&src);
+}
