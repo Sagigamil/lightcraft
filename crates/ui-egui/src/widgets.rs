@@ -19,6 +19,28 @@ pub fn register(ctx: &egui::Context, id: impl Into<String>, rect: Rect) {
     ctx.data_mut(|d| d.get_temp_mut_or_default::<Registry>(egui::Id::new("lc-registry")).0.push((id, rect)));
 }
 
+/// Give `r` the keyboard focus once, when the field first appears (or reappears after not being
+/// shown for a pass), never again while it stays on screen.
+///
+/// Don't call `Response::request_focus` every frame: each call also asks egui to interrupt the
+/// IME, which egui-winit turns into `set_ime_allowed(false)` + `set_ime_allowed(true)`. On
+/// Android that hides and re-shows the soft keyboard every frame, so it flickers and can't be
+/// typed into (and on desktop it breaks IME composition).
+pub fn autofocus(r: &Response) {
+    let key = r.id.with("lc-autofocus");
+    let pass = r.ctx.cumulative_pass_nr();
+    let last = r.ctx.data_mut(|d| {
+        let last = d.get_temp::<u64>(key);
+        d.insert_temp(key, pass);
+        last
+    });
+    // shown in the previous pass too (or already focused): leave the focus alone
+    let continuing = last.is_some_and(|l| l + 1 >= pass);
+    if !continuing && !r.has_focus() {
+        r.request_focus();
+    }
+}
+
 pub fn take_registry(ctx: &egui::Context) -> Vec<(String, Rect)> {
     ctx.data_mut(|d| std::mem::take(&mut d.get_temp_mut_or_default::<Registry>(egui::Id::new("lc-registry")).0))
 }

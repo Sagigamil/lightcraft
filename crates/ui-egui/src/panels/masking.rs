@@ -772,8 +772,8 @@ fn describe_field(app: &mut LightcraftApp, ui: &mut egui::Ui, new_mask: bool) {
                 .desired_width(ui.available_width()),
         );
         register(ui.ctx(), "maskDescribe", r.rect);
-        if !r.has_focus() && !r.lost_focus() && text.is_empty() {
-            r.request_focus();
+        if text.is_empty() {
+            crate::widgets::autofocus(&r);
         }
         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             submit = true;

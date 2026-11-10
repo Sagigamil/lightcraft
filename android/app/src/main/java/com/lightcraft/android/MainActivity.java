@@ -40,6 +40,10 @@ public final class MainActivity extends NativeActivity {
         getWindow().getDecorView().setSystemUiVisibility(0);
         getWindow().setStatusBarColor(0xff191919);
         getWindow().setNavigationBarColor(0xff191919);
+        // the soft keyboard's target (see ImeView): without it, Backspace is often dropped
+        ImeView ime = new ImeView(this);
+        addContentView(ime, new android.view.ViewGroup.LayoutParams(1, 1));
+        ime.requestFocus();
     }
     @Override protected void onPause() { event("save", ""); super.onPause(); }
     @Override public void onTrimMemory(int level) { super.onTrimMemory(level); event("memory", Integer.toString(level)); }
