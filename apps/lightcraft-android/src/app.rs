@@ -309,11 +309,11 @@ impl eframe::App for App {
                 self.request(ctx, json!({"op":"open", "recursive":self.recursive, "album":album}));
             }
         }
-        if self.last_save.elapsed() >= Duration::from_secs(1) {
-            if let Err(e) = self.save() {
-                self.inner.toast_error(ctx, e);
-                self.last_save = Instant::now();
-            }
+        if self.last_save.elapsed() >= Duration::from_secs(1)
+            && let Err(e) = self.save()
+        {
+            self.inner.toast_error(ctx, e);
+            self.last_save = Instant::now();
         }
         ctx.request_repaint_after(Duration::from_millis(100));
     }
