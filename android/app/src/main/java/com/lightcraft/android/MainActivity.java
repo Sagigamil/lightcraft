@@ -20,6 +20,8 @@ public final class MainActivity extends NativeActivity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Object sourceLock = new Object();
     private volatile boolean recursive = false;
+    /** The album an "open" was for (an album's Add Photos from Folder...), -1 = none. */
+    private volatile long openAlbum = -1;
     private volatile String lastExport = "", savePending = "";
     private SharedPreferences prefs;
     private volatile CountDownLatch saveResult;
@@ -69,25 +71,30 @@ public final class MainActivity extends NativeActivity {
             if (waiting != null) waiting.countDown();
             return;
         }
+        // the album travels with this pick only: a cancelled pick or a later Refresh has none
+        long album = request == OPEN ? openAlbum : -1;
+        if (request == OPEN) openAlbum = -1;
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         try {
             int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             getContentResolver().takePersistableUriPermission(uri, flags);
             prefs.edit().putString(request == OPEN ? "source" : "destination", uri.toString()).commit();
-            if (request == OPEN) scan(uri); else {
+            if (request == OPEN) scan(uri, album); else {
                 prefs.edit().putBoolean("createDocument", false).apply();
                 event("destination", uri.toString());
                 event("notice", "Export folder selected. Open File > Export to save photos.");
             }
         } catch (Exception e) { event("error", "Folder permission: " + e); }
     }
-    private void scan(Uri root) {
+    private void scan(Uri root, long album) {
         worker.execute(() -> {
             try {
                 JSONArray files = new JSONArray();
                 walk(root, DocumentsContract.getTreeDocumentId(root), files, new HashSet<>(), 0);
-                events.add(new JSONObject().put("kind", "files").put("files", files).put("tree", root.toString()));
+                JSONObject found = new JSONObject().put("kind", "files").put("files", files).put("tree", root.toString());
+                if (album >= 0) found.put("album", album);
+                events.add(found);
             } catch (Exception e) { event("error", "Reopen Folder to authorize access: " + e); }
         });
     }
@@ -192,7 +199,7 @@ public final class MainActivity extends NativeActivity {
             JSONObject q = new JSONObject(request), r = new JSONObject();
             switch (q.getString("op")) {
                 case "poll": { JSONArray a = new JSONArray(); JSONObject e; while ((e = events.poll()) != null) a.put(e); r.put("events", a); break; }
-                case "open": recursive = q.optBoolean("recursive"); picker(OPEN); break;
+                case "open": recursive = q.optBoolean("recursive"); openAlbum = q.optLong("album", -1); picker(OPEN); break;
                 case "destination": picker(DESTINATION); break;
                 case "exportDestination": r.put("value", prefs.getBoolean("createDocument", false) ? "Android Save As" : prefs.getString("destination", "")); break;
                 case "documentMode":
@@ -208,7 +215,7 @@ public final class MainActivity extends NativeActivity {
                 case "exportExists": r.put("exists", findExport(q.getString("name")) != null); break;
                 case "refresh": {
                     recursive = q.optBoolean("recursive");
-                    String root = prefs.getString("source", ""); if (!root.isEmpty()) scan(Uri.parse(root)); break;
+                    String root = prefs.getString("source", ""); if (!root.isEmpty()) scan(Uri.parse(root), -1); break;
                 }
                 case "read": r.put("path", materialize(Uri.parse(q.getString("uri"))).getAbsolutePath()); break;
                 case "exists": {

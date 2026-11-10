@@ -295,6 +295,8 @@ fn services() -> Services {
         pick_folder: Some(Box::new(|| {
             rfd::FileDialog::new().set_title(lightcraft_ui_egui::i18n::tr("Open Library")).pick_folder().map(|p| p.to_string_lossy().to_string())
         })),
+        // the folder dialog above serves an album's Add Photos from Folder… too
+        host_folder_import: false,
         open_with: Some(Box::new(|path: &str, app: &str| {
             // spawned, never waited for: the editor runs alongside
             let app = app.trim();

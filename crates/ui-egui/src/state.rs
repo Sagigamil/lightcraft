@@ -375,6 +375,11 @@ pub struct UiState {
     /// Window full screen requested (⇧⌘F); the host applies it (`None` = no change pending).
     #[serde(skip)]
     pub window_fullscreen: Option<bool>,
+    /// An album's Add Photos from Folder… on a host without a folder dialog of ours (Android: the
+    /// system folder picker): the album id. The host takes it (`Option::take`), lets the user
+    /// pick a folder and imports it into that album (`library.import` with `album`).
+    #[serde(skip)]
+    pub request_folder_import: Option<u64>,
     /// Compare view: (select, candidate) photo ids.
     #[serde(skip)]
     pub compare: Option<(u64, u64)>,
@@ -635,6 +640,7 @@ impl Default for UiState {
             navigator: true,
             settings: AppSettings::default(),
             window_fullscreen: None,
+            request_folder_import: None,
             filter_bar: false,
             local_roots: Vec::new(),
             local_browse_root: None,

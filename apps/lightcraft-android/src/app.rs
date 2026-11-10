@@ -22,6 +22,8 @@ struct ImportResult {
     prepared: Prepared,
     options: ImportOptions,
     now: String,
+    /// The album the photos also go to (an album's Add Photos from Folder…).
+    album: Option<u64>,
 }
 
 struct App {
@@ -87,6 +89,8 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
             let _ = b.call(json!({"op":"open"}));
             vec![]
         })),
+        // an album's Add Photos from Folder… comes back to us (`request_folder_import`): SAF picks
+        host_folder_import: true,
         ..Default::default()
     };
     let mut inner = LightcraftApp::new(session, services);
@@ -163,7 +167,7 @@ impl App {
             self.inner.toast_error(ctx, e);
         }
     }
-    fn import(&mut self, files: &[Value], ctx: &egui::Context) -> Result<(), String> {
+    fn import(&mut self, files: &[Value], album: Option<u64>, ctx: &egui::Context) -> Result<(), String> {
         if self.importing.is_some() {
             return Err("An import is already in progress. Cancel it or wait before rescanning.".into());
         }
@@ -189,7 +193,7 @@ impl App {
             .name("saf-import".into())
             .spawn(move || {
                 let prepared = job.prepare_files(paths, &cancel);
-                let _ = tx.send(ImportResult { prepared, options, now });
+                let _ = tx.send(ImportResult { prepared, options, now, album });
                 ctx.request_repaint();
             })
             .map_err(|e| e.to_string())?;
@@ -206,10 +210,13 @@ impl App {
                 for event in reply.get("events").and_then(Value::as_array).into_iter().flatten() {
                     match event.get("kind").and_then(Value::as_str).unwrap_or_default() {
                         "files" => {
-                            if let Some(files) = event.get("files").and_then(Value::as_array) {
-                                if let Err(e) = self.import(files, ctx) {
-                                    self.inner.toast_error(ctx, e);
-                                }
+                            // the folder picked for an album's Add Photos from Folder… names it
+                            // (Java echoes the `album` of the "open" request; Refresh has none)
+                            let album = event.get("album").and_then(Value::as_u64);
+                            if let Some(files) = event.get("files").and_then(Value::as_array)
+                                && let Err(e) = self.import(files, album, ctx)
+                            {
+                                self.inner.toast_error(ctx, e);
                             }
                         }
                         "save" => {
@@ -257,7 +264,19 @@ impl App {
                             self.inner.toast_error(ctx, e.to_string());
                         }
                     }
-                    self.inner.toast(ctx, format!("Imported {} photos; {} failed", report.imported.len(), report.failed.len()));
+                    // into the album too: the new photos and those the library already had
+                    let mut in_album = None;
+                    if let Some(album) = result.album {
+                        match lightcraft_engine::cmd::library::import_batch_done(&mut self.inner.session, report.clone(), Some(album), None) {
+                            Ok(_) => in_album = Some(lightcraft_engine::cmd::library::import_album_members(&self.inner.session, &report).len()),
+                            Err(e) => self.inner.toast_error(ctx, e.to_string()),
+                        }
+                    }
+                    let text = match in_album {
+                        Some(n) => format!("Imported {} photos; {} failed; {n} in the album", report.imported.len(), report.failed.len()),
+                        None => format!("Imported {} photos; {} failed", report.imported.len(), report.failed.len()),
+                    };
+                    self.inner.toast(ctx, text);
                     for (_, error) in report.failed {
                         self.inner.notices.push(error);
                     }
@@ -282,6 +301,14 @@ impl eframe::App for App {
             self.inner.ui.before_after = before;
         }
         self.inner.logic(ctx);
+        // an album's Add Photos from Folder…: the system folder picker, the album riding along
+        if let Some(album) = self.inner.ui.request_folder_import.take() {
+            if self.importing.is_some() {
+                self.inner.toast_error(ctx, "An import is already in progress. Cancel it or wait before adding photos.");
+            } else {
+                self.request(ctx, json!({"op":"open", "recursive":self.recursive, "album":album}));
+            }
+        }
         if self.last_save.elapsed() >= Duration::from_secs(1) {
             if let Err(e) = self.save() {
                 self.inner.toast_error(ctx, e);

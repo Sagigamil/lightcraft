@@ -808,7 +808,13 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::Import { opts } => {
                         let n = opts.selected_paths().len();
                         let verb = if opts.copy && opts.move_files { "Move" } else { "Import" };
-                        add_label = crate::i18n::tr_format!("{verb} {n} Photo{}", if n == 1 { "" } else { "s" }, verb = crate::i18n::tr(verb), n = n);
+                        let existing = if n == 0 && opts.has_album() { opts.existing_photos(&app.session.catalog).len() } else { 0 };
+                        add_label = if existing > 0 {
+                            // everything is in the library already: it only joins the album
+                            crate::i18n::tr_format!("Add {n} Photo{} to Album", if existing == 1 { "" } else { "s" }, n = existing)
+                        } else {
+                            crate::i18n::tr_format!("{verb} {n} Photo{}", if n == 1 { "" } else { "s" }, verb = crate::i18n::tr(verb), n = n)
+                        };
                         add_label.as_str()
                     }
                     Dialog::Merge { .. } => "Merge",
