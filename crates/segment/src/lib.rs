@@ -116,6 +116,16 @@ pub struct Encoded {
     detector: Option<detector::Features>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+/// An image encoder other than the built-in candle backbone, for the same square input.
+///
+/// The Android AI build runs the 32-layer ViT on the Hexagon NPU through QNN and returns its
+/// tokens here, so the neck, tracker and detector still run in candle exactly as on the CPU.
+pub trait BackboneEncoder: Send + Sync {
+    /// `pixels`: `[1, 3, 1008, 1008]` normalized to −1..1. Returns `[1, 1024, 72, 72]`.
+    fn encode(&self, pixels: &[f32]) -> std::result::Result<Vec<f32>, String>;
+}
+
 /// A predicted mask: `MASK_SIDE²` logits over the model's square input (which the image was
 /// stretched to), and a confidence 0..1.
 #[derive(Clone, Debug)]
@@ -160,6 +170,22 @@ impl Sam3 {
     /// Run the backbone on preprocessed pixels `[1, 3, 1008, 1008]` (−1..1).
     pub fn encode_pixels(&self, pixels: &Tensor) -> Result<Encoded> {
         Ok(Encoded { backbone: self.backbone.forward(&pixels.to_device(&self.device)?)?, tracker: None, detector: None })
+    }
+
+    /// Run `encoder` (an accelerator) instead of the built-in backbone on an RGB image.
+    ///
+    /// The accelerator gets the same preprocessed input and must return the same tokens, so
+    /// everything after it (neck, tracker, detector, masks) is unchanged. Callers fall back to
+    /// [`Sam3::encode`] when this fails.
+    pub fn encode_with(&self, rgb: &[u8], w: usize, h: usize, encoder: &dyn BackboneEncoder) -> Result<Encoded> {
+        let pixels = mask::preprocess(rgb, w, h, INPUT)?;
+        let tokens = encoder.encode(&pixels).map_err(Error::Model)?;
+        let want = vit::HIDDEN * vit::GRID * vit::GRID;
+        if tokens.len() != want {
+            return Err(Error::Model(format!("the AI accelerator returned {} values, expected {want}", tokens.len())));
+        }
+        let backbone = Tensor::from_vec(tokens, (1, vit::HIDDEN, vit::GRID, vit::GRID), &self.device)?;
+        Ok(Encoded::from_backbone(backbone))
     }
 
     fn tracker_parts(&mut self) -> Result<(&neck::Neck, &tracker::Tracker)> {
@@ -245,6 +271,12 @@ impl Encoded {
     /// The backbone output `[1, 1024, 72, 72]` (tests).
     pub fn backbone(&self) -> &Tensor {
         &self.backbone
+    }
+
+    /// Wrap backbone tokens `[1, 1024, 72, 72]` (e.g. from [`BackboneEncoder`]) as encoded
+    /// features; the head features are computed on first use.
+    pub fn from_backbone(backbone: Tensor) -> Self {
+        Encoded { backbone, tracker: None, detector: None }
     }
 }
 

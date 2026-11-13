@@ -44,6 +44,59 @@ struct App {
     model_error: Arc<std::sync::Mutex<Option<String>>>,
 }
 
+/// SAM 3's vision backbone on the Hexagon NPU (the AI edition's QNN chain).
+///
+/// The Rust worker hands over the preprocessed image; Java extracts the context binaries once
+/// and `libqnn_chain.so` runs stem + two 16-block chunks on the HTP, returning the token
+/// tensor. The neck and decoder stay in the Rust engine, and any failure falls back to the
+/// CPU backbone in the worker.
+#[cfg(all(feature = "sam", target_os = "android"))]
+struct NpuEncoder {
+    bridge: Arc<Bridge>,
+    dir: std::path::PathBuf,
+    input: std::path::PathBuf,
+    output: std::path::PathBuf,
+}
+
+#[cfg(all(feature = "sam", target_os = "android"))]
+impl lightcraft_engine::segment::BackboneEncoder for NpuEncoder {
+    fn encode(&self, pixels: &[f32]) -> std::result::Result<Vec<f32>, String> {
+        const GRID: usize = 72;
+        const HIDDEN: usize = 1024;
+        let n = GRID * GRID * HIDDEN;
+        let fail = |what: &str, e: &dyn std::fmt::Display| format!("Hexagon NPU {what}: {e}");
+        std::fs::create_dir_all(&self.dir).map_err(|e| fail("folder", &e))?;
+        // The Java side reads the raw f32 tensor; Android is little-endian (aarch64).
+        let mut bytes = Vec::with_capacity(pixels.len() * 4);
+        for v in pixels {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(&self.input, &bytes).map_err(|e| fail("input", &e))?;
+        let reply = self
+            .bridge
+            .call(json!({
+                "op": "qnnEncode",
+                "input": self.input.to_string_lossy(),
+                "output": self.output.to_string_lossy(),
+            }))?;
+        let ms = reply.get("ms").and_then(Value::as_u64).unwrap_or(0);
+        let raw = std::fs::read(&self.output).map_err(|e| fail("output", &e))?;
+        if raw.len() != n * 4 {
+            return Err(format!("Hexagon NPU returned {} bytes, expected {}", raw.len(), n * 4));
+        }
+        // NHWC (the graph's layout) to NCHW (what the neck expects).
+        let mut tokens = vec![0f32; n];
+        for (i, px) in raw.chunks_exact(4 * HIDDEN).enumerate() {
+            for c in 0..HIDDEN {
+                let b = &px[c * 4..c * 4 + 4];
+                tokens[c * GRID * GRID + i] = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            }
+        }
+        log::info!("SAM 3 vision backbone on the Hexagon NPU: {ms} ms");
+        Ok(tokens)
+    }
+}
+
 pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
     let dir = android.internal_data_path().ok_or("Android internal data directory is unavailable")?;
     let bridge = Bridge::new(android.clone())?;
@@ -56,8 +109,20 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
     let model_error: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     #[cfg(feature = "sam")]
     {
-        session.segmenter.dir = Some(dir.join("models").join("sam3"));
+        let model_dir = dir.join("models").join("sam3");
+        session.segmenter.dir = Some(model_dir.clone());
         session.segmenter.embedded = true;
+        #[cfg(target_os = "android")]
+        {
+            // The NPU chain's contexts live beside the checkpoint (extracted on first use).
+            let qnn = model_dir.join("qnn");
+            session.segmenter.npu = Some(Arc::new(NpuEncoder {
+                bridge: bridge.clone(),
+                dir: qnn.clone(),
+                input: qnn.join("input.raw"),
+                output: qnn.join("tokens.raw"),
+            }));
+        }
         let b = bridge.clone();
         let error = model_error.clone();
         std::thread::Builder::new()

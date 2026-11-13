@@ -24,6 +24,7 @@ public final class MainActivity extends NativeActivity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Object sourceLock = new Object();
     private final Object modelLock = new Object();
+    private final Object qnnLock = new Object();
     private volatile boolean recursive = false;
     /** The album an "open" was for (an album's Add Photos from Folder...), -1 = none. */
     private volatile long openAlbum = -1;
@@ -252,6 +253,89 @@ public final class MainActivity extends NativeActivity {
         Files.move(part.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
     }
 
+    /**
+     * Copy the embedded NPU artifacts (QNN context binaries) out of the APK once. They are
+     * large (~0.9 GB) and aapt2 stores them uncompressed, so each copy is a straight copy;
+     * the sizes in {@code qnn/manifest.json} catch a truncated file. A .ready marker (holding
+     * that manifest) skips the per-file size checks on later launches.
+     */
+    private File extractQnn() throws Exception {
+        synchronized (qnnLock) {
+            File dir = new File(getFilesDir(), "models/sam3/qnn");
+            if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Could not create " + dir);
+            String manifest = new String(readAll(getAssets().open("qnn/manifest.json")), StandardCharsets.UTF_8);
+            JSONObject files = new JSONObject(manifest).getJSONObject("files");
+            File ready = new File(dir, ".ready");
+            boolean current = ready.isFile();
+            if (current) {
+                for (Iterator<String> it = files.keys(); it.hasNext();) {
+                    String name = it.next();
+                    File target = new File(dir, name);
+                    if (!target.isFile() || target.length() != files.getJSONObject(name).getLong("size")) { current = false; break; }
+                }
+            }
+            if (current) return dir;
+            JSONArray copied = new JSONArray();
+            for (Iterator<String> it = files.keys(); it.hasNext();) {
+                String name = it.next();
+                File target = new File(dir, name);
+                long size = files.getJSONObject(name).getLong("size");
+                if (target.isFile() && target.length() == size) continue;
+                copyAssetSized("qnn/" + name, target, size);
+                copied.put(name);
+            }
+            Files.write(ready.toPath(), manifest.getBytes(StandardCharsets.UTF_8));
+            android.util.Log.i("LightCraft", "NPU context assets: " + copied.length() + " copied");
+            return dir;
+        }
+    }
+
+    private void copyAssetSized(String asset, File target, long size) throws Exception {
+        File part = new File(target.getParentFile(), target.getName() + ".part");
+        long total = 0;
+        try (InputStream in = getAssets().open(asset); OutputStream out = new FileOutputStream(part)) {
+            byte[] buffer = new byte[1 << 20];
+            int n;
+            while ((n = in.read(buffer)) != -1) {
+                out.write(buffer, 0, n);
+                total += n;
+            }
+        } catch (Exception e) {
+            part.delete();
+            throw e;
+        }
+        if (total != size) {
+            part.delete();
+            throw new IOException("Embedded NPU file " + asset + " is " + total + " bytes, expected " + size);
+        }
+        Files.move(part.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    /** The chain spec for QnnEncoder (one stage per line) from the packaged manifest. */
+    private String qnnSpec() throws Exception {
+        String manifest = new String(readAll(getAssets().open("qnn/manifest.json")), StandardCharsets.UTF_8);
+        JSONArray stages = new JSONObject(manifest).getJSONArray("stages");
+        StringBuilder spec = new StringBuilder();
+        for (int i = 0; i < stages.length(); i++) {
+            JSONObject s = stages.getJSONObject(i);
+            if (i > 0) spec.append('\n');
+            spec.append(s.getString("context")).append('|').append(s.getString("graph")).append('|')
+                .append(s.getString("input")).append('|').append(joinDims(s.getJSONArray("inputDims"))).append('|')
+                .append(s.getInt("inputId")).append('|').append(s.getString("output")).append('|')
+                .append(joinDims(s.getJSONArray("outputDims"))).append('|').append(s.getInt("outputId"));
+        }
+        return spec.toString();
+    }
+
+    private static String joinDims(JSONArray dims) throws Exception {
+        StringBuilder s = new StringBuilder();
+        for (int i = 0; i < dims.length(); i++) {
+            if (i > 0) s.append(',');
+            s.append(dims.getInt(i));
+        }
+        return s.toString();
+    }
+
     private static byte[] readAll(InputStream in) throws IOException {
         try (InputStream input = in; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192];
@@ -308,6 +392,26 @@ public final class MainActivity extends NativeActivity {
                     }); break;
                 }
                 case "extractModel": r.put("result", extractModel()); break;
+                case "qnnEncode": {
+                    // Compiled only into the AI edition (QnnEncoder lives in its source set).
+                    try {
+                        File dir = extractQnn();
+                        Class<?> cls = Class.forName("com.lightcraft.android.QnnEncoder");
+                        java.lang.reflect.Method encode = cls.getDeclaredMethod(
+                            "encode", String.class, String.class, String.class, String.class, String.class);
+                        encode.setAccessible(true);
+                        long ms = (Long) encode.invoke(null, dir.getAbsolutePath(), getApplicationInfo().nativeLibraryDir, qnnSpec(),
+                            q.getString("input"), q.getString("output"));
+                        if (ms < 0) throw new IOException("encode failed (code " + ms + ")");
+                        r.put("ms", ms);
+                    } catch (java.lang.reflect.InvocationTargetException e) {
+                        Throwable cause = e.getCause() != null ? e.getCause() : e;
+                        throw new IOException("the Hexagon NPU is unavailable: " + cause);
+                    } catch (Throwable t) {
+                        throw new IOException("the Hexagon NPU is unavailable: " + t);
+                    }
+                    break;
+                }
                 case "finish": runOnUiThread(this::finish); break;
                 default: throw new IOException("Unknown Android operation");
             }

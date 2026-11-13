@@ -1,7 +1,9 @@
 # Snapdragon Hexagon NPU (QNN/HTP) investigation
 
-Status: **in progress — NPU inference is not yet verified.** The CPU backend remains the shipping
-path and is unchanged.
+Status: **verified in the AI edition** on a Lenovo Legion Y700 (SM8850P, Hexagon v81, Android 16).
+The 32-layer ViT encoder runs on the HTP as three chained QNN contexts (stem + two 16-block
+chunks); the neck, prompt encoder, tracker and mask decoder stay in the pure-Rust candle engine on
+the CPU. The CPU backbone remains the fallback and the Lite edition has no NPU code at all.
 
 ## 1. Model and current backend
 
@@ -137,12 +139,12 @@ sequence on the HTP, binding the graph tensors by id and passing the token tenso
 
 Device run (Lenovo Y700, SM8850P, QNN 2.50, HTP v81):
 
-| Stage | Time |
-|---|---|
-| stem (image -> tokens) | 23.4 ms |
-| blocks 0-16 | 7 128.9 ms |
-| blocks 16-32 | 7 656.8 ms |
-| whole chain (incl. loading the 2 x 231/451 MB contexts) | 24 618 ms |
+| Stage | Standalone runner | In the app, first encode | In the app, detail pass |
+|---|---|---|---|
+| stem (image -> tokens) | 23.4 ms | 24.4 ms | 23.0 ms |
+| blocks 0-16 | 7 128.9 ms | 7 492 ms | 7 804 ms |
+| blocks 16-32 | 7 656.8 ms | 7 494 ms | 8 165 ms |
+| whole chain (incl. creating both 451 MB contexts) | 24 618 ms | ~31 s | 32.3 s |
 
 `rc=0`, tokens written. This is genuine Hexagon execution: the tiny control graph, single blocks
 and the chained partitions all run on the NPU, while the monolithic graph fails.
@@ -153,13 +155,53 @@ Accuracy against PyTorch on the same 1008x1008 input (fp32 reference, fp16 HTP):
 - mean absolute error **0.0359** (reference RMS 1.69, ~2 %)
 - max absolute error 80.9 on outliers (fp16 accumulation over 32 blocks)
 
-End-to-end mask IoU against the CPU path still has to be measured after the app integration.
+The same tokens through the unchanged Rust neck/tracker (`crates/segment/examples/npu_check.rs`)
+give the same mask as the CPU backbone for the same clicks:
 
-## 9. Remaining integration work
+- tokens vs the Rust CPU backbone: cosine **0.998750**, mean abs err 3.586e-2
+- mask **IoU 0.9996**, pixel agreement **99.96 %** (scores 0.6561 vs 0.6545)
 
-1. JNI wrapper around `qnn_run_chain` + a Java `QnnEncoder` called from the existing bridge.
-2. Package the three contexts (stem 11.5 MB, blocks 0-16 231 MB, blocks 16-32 451 MB), the QNN
-   runtime libs (HTP, v81 stub/skel, System) and the JNI library in the **AI** flavor only.
-3. Rust worker: when the NPU chain is available, build `Encoded` from its token output instead of
-   running the CPU ViT; otherwise fall back to candle. The CPU neck and decoder stay unchanged.
-4. Verify masks (IoU) and latency in the app, then document the backend per component.
+## 9. Integration in the AI edition
+
+- **Rust:** `lightcraft_segment::BackboneEncoder` takes the preprocessed pixels and returns the
+  NCHW token tensor; `Sam3::encode_with` builds an `Encoded` from it (`Encoded::from_backbone`).
+  `Segmenter.npu` carries the accelerator into every worker job; the worker uses it for the
+  initial encode and for detail passes, and falls back to the candle backbone on any error. The
+  neck, prompt encoder, tracker and detector are untouched.
+- **Android:** `MainActivity`'s `qnnEncode` bridge op extracts the context binaries once to
+  `files/models/sam3/qnn/` and calls `QnnEncoder.encode` (AI source set, reached by reflection from
+  the shared code) -> JNI -> `libqnn_chain.so` -> `qnn_run_chain`. Logcat shows the HTP backend
+  init and each stage (tag `LightCraftQnn`); the app reports `backend: "npu+cpu"`.
+- **Packaging (AI edition only):** the three contexts are stored assets (copied on first use);
+  `libQnnHtp.so`, the v81 stub, the QNN 2.50 skel, `libQnnSystem.so`, `libQnnModelDlc.so` and
+  `libqnn_chain.so` are jniLibs, with `jniLibs.useLegacyPackaging = true` so they are real files
+  under `nativeLibraryDir`. `<uses-native-library android:name="libcdsprpc.so">` is required on
+  Android 12+ to make the vendor FastRPC client visible to the app. The Lite edition ships none of
+  this. The APK stays at ~1.88 GB (the contexts add ~0.9 GB).
+
+Android-specific findings, each one a failure mode hit here:
+
+- **App data is not loadable:** `dlopen` of a library from app storage is blocked for apps
+  targeting API 29+. QNN host libraries must be extracted native libraries (`nativeLibraryDir`).
+- **Real files, not zip entries:** the HTP backend loads `libQnnHtpV81Stub.so` from next to
+  itself, so `libQnnHtp.so` must be a real file; an APK entry path is not usable.
+- **Skeleton lookup:** the FastRPC client resolves the skel directory from `ADSP_LIBRARY_PATH`
+  (which an app cannot set at exec time; `setenv` after startup has no effect) and from the process
+  working directory. The runner `chdir`s to `nativeLibraryDir` (which holds
+  `libQnnHtpV81Skel.so`) before creating the backend. The OEM's signed skel in
+  `/vendor/lib/rfsa/adsp` exports an older handle symbol (`qnn_2_xx_...`), so the QNN 2.50 skel is
+  shipped instead.
+- **Vendor namespace:** `libcdsprpc.so` is a vendor public library; without the manifest
+  declaration even its transitive `dlopen` fails with "not found in namespace clns-N".
+
+Limits: both 451 MB contexts are recreated on every encode (~16 s on top of ~16 s of HTP compute).
+Caching them would save that but hold ~1 GB more resident memory; not done. The detail pass runs
+the full chain again (32 s measured).
+
+## 10. Verified on the device
+
+With the AI edition installed on the Y700: opening **AI Object Select** encoded the photo on the
+NPU (`LightCraftQnn`: stages 24.4 / 7 492 / 7 494 ms), a tap produced the expected mask (table,
+then the white pitcher), and the automatic detail pass re-ran the chain (23.0 / 7 804 / 8 165 ms,
+32.3 s) and refined the mask around the pitcher. The mask was kept and the UI behaved as on the
+CPU path.

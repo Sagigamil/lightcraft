@@ -8,6 +8,8 @@
 // stub/skel) are packaged in the AI flavor and loaded with dlopen.
 
 #include <dlfcn.h>
+#include <jni.h>
+#include <unistd.h>
 #include <android/log.h>
 #include <chrono>
 #include <cstdio>
@@ -59,11 +61,48 @@ const QnnVTable* fn() {
     return g_engine.iface ? &g_engine.iface->QNN_INTERFACE_VER_NAME : nullptr;
 }
 
-bool init_engine(Engine& e) {
+bool init_engine(Engine& e, const char* lib_dir) {
     if (e.ready) return true;
-    e.lib = dlopen("libQnnHtp.so", RTLD_NOW | RTLD_LOCAL);
+    // The DSP loader finds the Hexagon skeleton through ADSP_LIBRARY_PATH. Android apps cannot
+    // set the environment at exec time, and the FastRPC client also resolves the default skel
+    // directory relative to the process's working directory, so point both at the directory
+    // holding the QNN 2.50 `libQnnHtpV81Skel.so`. (Android paths are absolute everywhere in
+    // LightCraft, so the chdir is harmless; the OEM's signed skel is tried second.)
+    if (!getenv("ADSP_LIBRARY_PATH")) {
+        std::string path;
+        if (lib_dir && *lib_dir && lib_dir[0] == '/') path = std::string(lib_dir) + ":";
+        path += "/vendor/lib/rfsa/adsp:/vendor/lib64";
+        setenv("ADSP_LIBRARY_PATH", path.c_str(), 1);
+    }
+    if (lib_dir && lib_dir[0] == '/') {
+        std::string skel = std::string(lib_dir) + "/libQnnHtpV81Skel.so";
+        if (access(skel.c_str(), R_OK) == 0 && chdir(lib_dir) == 0) {
+            LOGI("using Hexagon skel from %s", lib_dir);
+        }
+    }
+    // The HTP backend loads libQnnHtpV81Stub.so from next to itself; inside an APK that path
+    // is a zip entry the linker cannot use, so the app stages real copies in `lib_dir` and we
+    // load those first (the bare names are the on-device test's fallback).
+    const std::string dir = (lib_dir && *lib_dir) ? std::string(lib_dir) : std::string();
+    auto open_lib = [&dir](const char* name, int flags) -> void* {
+        void* handle = nullptr;
+        if (!dir.empty()) {
+            std::string path = dir + "/" + name;
+            handle = dlopen(path.c_str(), flags);
+        }
+        if (!handle) handle = dlopen(name, flags);
+        if (handle) {
+            LOGI("loaded %s", name);
+        } else {
+            const char* why = dlerror();
+            LOGE("cannot load %s: %s", name, why ? why : "unknown error");
+        }
+        return handle;
+    };
+    open_lib("libQnnHtpV81Stub.so", RTLD_NOW | RTLD_LOCAL);  // stays loaded for the backend
+    e.lib = open_lib("libQnnHtp.so", RTLD_NOW | RTLD_GLOBAL);
     if (!e.lib) {
-        e.error = std::string("dlopen libQnnHtp.so: ") + dlerror();
+        e.error = "dlopen libQnnHtp.so failed";
         return false;
     }
     auto get_providers = reinterpret_cast<GetProvidersFn>(dlsym(e.lib, "QnnInterface_getProviders"));
@@ -161,10 +200,10 @@ Qnn_Tensor_t make_tensor(uint32_t id, const std::string& name, const std::vector
 
 }  // namespace
 
-extern "C" int qnn_run_chain(const char* dir, const char* spec, const float* input, size_t input_floats, const char* output_path,
-                             long* encoder_ms) {
-    if (!init_engine(g_engine)) {
-        std::fprintf(stderr, "init failed: %s\n", g_engine.error.c_str());
+extern "C" int qnn_run_chain(const char* lib_dir, const char* dir, const char* spec, const float* input, size_t input_floats,
+                             const char* output_path, long* encoder_ms) {
+    if (!init_engine(g_engine, lib_dir)) {
+        LOGE("init failed: %s", g_engine.error.c_str());
         return -1;
     }
     const auto* q = fn();
@@ -242,5 +281,54 @@ extern "C" int qnn_run_chain(const char* dir, const char* spec, const float* inp
 }
 
 extern "C" const char* qnn_backend_name() {
-    return init_engine(g_engine) ? "Qualcomm Hexagon HTP (QNN)" : "unavailable";
+    return init_engine(g_engine, nullptr) ? "Qualcomm Hexagon HTP (QNN)" : "unavailable";
+}
+
+// ---- JNI entry point for the Android AI build -------------------------------------------
+
+namespace {
+
+std::string to_string(JNIEnv* env, jstring s) {
+    if (!s) return {};
+    const char* c = env->GetStringUTFChars(s, nullptr);
+    if (!c) return {};
+    std::string out(c);
+    env->ReleaseStringUTFChars(s, c);
+    return out;
+}
+
+}  // namespace
+
+/// Java_com_lightcraft_android_QnnEncoder_encode(dir, libDir, spec, inputPath, outputPath):
+/// runs the chain and returns its time in milliseconds, or a negative failure code.
+extern "C" JNIEXPORT jlong JNICALL Java_com_lightcraft_android_QnnEncoder_encode(JNIEnv* env, jclass, jstring jdir, jstring jlib,
+                                                                                jstring jspec, jstring jinput, jstring joutput) {
+    const std::string dir = to_string(env, jdir);
+    const std::string lib = to_string(env, jlib);
+    const std::string spec_text = to_string(env, jspec);
+    const std::string input_path = to_string(env, jinput);
+    const std::string output_path = to_string(env, joutput);
+    if (dir.empty() || spec_text.empty() || input_path.empty() || output_path.empty()) {
+        LOGE("QnnEncoder.encode: a required argument is empty");
+        return -10;
+    }
+    std::ifstream in(input_path, std::ios::binary | std::ios::ate);
+    if (!in) {
+        LOGE("QnnEncoder.encode: cannot read %s", input_path.c_str());
+        return -11;
+    }
+    auto bytes = static_cast<size_t>(in.tellg());
+    in.seekg(0);
+    std::vector<float> pixels(bytes / sizeof(float));
+    if (!in.read(reinterpret_cast<char*>(pixels.data()), static_cast<std::streamsize>(bytes))) {
+        LOGE("QnnEncoder.encode: short read on %s", input_path.c_str());
+        return -12;
+    }
+    long ms = 0;
+    int rc = qnn_run_chain(lib.c_str(), dir.c_str(), spec_text.c_str(), pixels.data(), pixels.size(), output_path.c_str(), &ms);
+    if (rc != 0) {
+        LOGE("QnnEncoder.encode: chain failed, rc %d", rc);
+        return static_cast<jlong>(rc);
+    }
+    return static_cast<jlong>(ms);
 }

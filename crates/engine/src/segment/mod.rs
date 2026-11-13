@@ -114,6 +114,14 @@ pub struct DownloadStatus {
     pub finished: bool,
 }
 
+/// The accelerator that runs the vision backbone in place of candle's CPU path (the Android
+/// AI build's Hexagon NPU). The neck, tracker and detector still run in candle.
+#[cfg(feature = "sam")]
+pub type Accelerator = std::sync::Arc<dyn lightcraft_segment::BackboneEncoder>;
+
+#[cfg(feature = "sam")]
+pub use lightcraft_segment::BackboneEncoder;
+
 /// The model (on its worker thread), the download, and AI mask requests in flight.
 pub struct Segmenter {
     /// Where the `facebook/sam3` files live (set by the app; `None`: no AI masks).
@@ -121,6 +129,10 @@ pub struct Segmenter {
     /// The model ships inside the app (Android AI): it is extracted from the APK to `dir`
     /// and never downloaded. Requests before extraction finishes report "preparing".
     pub embedded: bool,
+    /// Runs the vision backbone on an accelerator (Android AI: the Hexagon NPU); `None` or a
+    /// failure uses the CPU backbone.
+    #[cfg(feature = "sam")]
+    pub npu: Option<Accelerator>,
     /// The user's list of download mirrors (one base URL per line), if any.
     pub mirrors_file: Option<PathBuf>,
     /// Run requests in the background and apply them in [`Session::segment_poll`] (the
@@ -143,6 +155,8 @@ impl Default for Segmenter {
         Segmenter {
             dir: None,
             embedded: false,
+            #[cfg(feature = "sam")]
+            npu: None,
             mirrors_file: None,
             background: false,
             pending: None,
@@ -161,14 +175,17 @@ impl Segmenter {
     /// Whether this build can compute AI masks at all.
     pub const AVAILABLE: bool = cfg!(feature = "sam");
 
-    /// The inference backend this build uses. The Android AI build runs the pure-Rust SAM 3
-    /// engine on the CPU (ARM64 NEON); it never claims Hexagon NPU acceleration.
+    /// The inference backend this build uses: the Hexagon NPU runs the vision backbone on the
+    /// Android AI build; the neck, decoder and detector are the pure-Rust engine on the CPU.
     pub fn backend(&self) -> &'static str {
         if !Self::AVAILABLE {
-            "none"
-        } else if cfg!(target_os = "android") {
-            "cpu"
-        } else if cfg!(target_os = "macos") {
+            return "none";
+        }
+        #[cfg(feature = "sam")]
+        if self.npu.is_some() {
+            return "npu+cpu";
+        }
+        if cfg!(target_os = "macos") {
             "metal-or-cpu"
         } else {
             "cpu"
@@ -443,7 +460,7 @@ impl Session {
                 job
             }
         };
-        Ok(worker::Job { dir, key: if region.is_some() { 0 } else { key }, render: Some(render), missing, kind, tag, reply })
+        Ok(worker::Job { dir, key: if region.is_some() { 0 } else { key }, render: Some(render), missing, kind, tag, reply, npu: self.segmenter.npu.clone() })
     }
 
     /// Send a request and wait for its result (CLI, MCP, tests; or when not in background mode).

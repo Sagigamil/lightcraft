@@ -40,13 +40,15 @@ visual-prompt components (`tracker.sam_prompt_encoder.*`, `tracker.sam_mask_deco
 keeps exactly those (plus the shared ViT and the point-tracker neck) and drops the text encoder
 and the DETR detector head. Nothing is substituted: this is SAM 3's own interactive segmenter.
 
-**Runtime/backend:** candle **CPU** on ARM64 (NEON). There is no Hexagon NPU backend: Qualcomm's
-SAM 3 export is text-only, and a QNN port of the interactive decoder does not exist here. The app
-reports `backend: "cpu"` and never claims NPU acceleration.
+**Runtime/backend:** on Android the vision encoder's 32-layer ViT runs on the **Hexagon NPU**
+through QNN/HTP (stem + two 16-block context binaries, fp16); the neck, prompt encoder, tracker
+and mask decoder remain the pure-Rust candle engine on the CPU (F16 weights, F32 compute). The app
+reports `backend: "npu+cpu"`. The CPU backbone is the fallback: if the NPU chain fails to load or
+run, the same photo is encoded on the CPU and the mask is computed as before. Desktop builds use
+Metal (macOS) or the CPU. The Lite edition has no AI code at all.
 
-Fallbacks considered (not needed): Qualcomm's SAM 2 / MobileSAM exports are point-capable but
-would require a QNN/ONNX Runtime + C++ integration and a separate decoder export. SAM 3's own
-point path already existed, is tested, and produces the required quality, so it is used.
+The NPU path is documented in `docs/SNAPDRAGON_NPU.md`: tokens match the CPU backbone with cosine
+0.99875 and the resulting masks agree with the CPU path at IoU 0.9996.
 
 ## 2. Checkpoint source, version and licence
 
@@ -286,19 +288,23 @@ Not verified:
 
 - EXIF-rotated/portrait fixtures, boundary objects and zoom/pan taps on the device (the
   transforms are shared with the desktop engine, which covers them with its mask tests).
-- NPU acceleration: no NPU backend exists to verify.
+- NPU masks beyond the checks in `docs/SNAPDRAGON_NPU.md` (one still-life photo and a detail
+  pass; tokens/mask agreement with the CPU path is measured offline).
 
 ## 10. Known limitations
 
-- CPU inference: the image encode takes tens of seconds on a tablet-class CPU; taps after it take
-  a couple of seconds. The encode runs once per photo/look.
-- The model holds several GB while loaded; it is unloaded on memory pressure and after 10 minutes
-  idle, so the next selection pays the load/encode cost again.
+- The encode runs once per photo/look: on the AI edition the NPU takes about 16 s of HTP compute
+  plus about 16 s to recreate the QNN contexts; the CPU fallback takes tens of seconds. Taps after
+  the encode take a couple of seconds. The automatic detail pass runs the encoder again.
+- The model and the QNN contexts hold about 2 GB of native memory together; the model is unloaded
+  on memory pressure and after 10 minutes idle, so the next selection pays the load/encode cost
+  again.
 - The Android checkpoint is point-only, so **Describe is hidden** on Android.
 - Release APKs use the local debug signing key.
-- No Hexagon NPU acceleration (see §1).
-- The AI APK is large because the weights are embedded uncompressed-as-stored (required for
-  offline use).
+- The NPU path is Android AI only, built for Hexagon v81 (SM8850P); other SoCs need their own
+  compiled contexts and skel.
+- The AI APK is large (~1.88 GB) because the weights and the QNN contexts are embedded
+  uncompressed-as-stored (required for offline use).
 
 ## 11. Changing the inference resolution
 

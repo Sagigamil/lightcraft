@@ -19,7 +19,7 @@ use std::time::Duration;
 use lightcraft_develop::SegMask;
 use lightcraft_segment::{Encoded, Sam3};
 
-use super::{Input, Prompt, Tag};
+use super::{Accelerator, Input, Prompt, Tag};
 use crate::media::RenderJob;
 
 /// Unload the model after this long without a request.
@@ -57,6 +57,8 @@ pub struct Job {
     pub kind: Kind,
     pub tag: Tag,
     pub reply: mpsc::Sender<Outcome>,
+    /// The vision backbone accelerator this request uses (`None`: CPU).
+    pub npu: Option<Accelerator>,
 }
 
 /// A finished request: the segmentation (`None`: nothing selected / nothing to report).
@@ -143,7 +145,7 @@ impl Worker {
     /// Queue an unload of the model and the cached photo; returns at once.
     pub fn unload(&mut self) {
         let (reply, _) = mpsc::channel();
-        let job = Job { dir: PathBuf::new(), key: 0, render: None, missing: None, kind: Kind::Unload, tag: super::Tag::Wait, reply };
+        let job = Job { dir: PathBuf::new(), key: 0, render: None, missing: None, kind: Kind::Unload, tag: super::Tag::Wait, reply, npu: None };
         if let Err(e) = self.submit(job) {
             log::warn!("could not queue the AI model unload: {e}");
         }
@@ -282,6 +284,18 @@ fn render(job: &mut Job) -> Result<Input, String> {
     Ok(Input { rgb, w: img.width, h: img.height })
 }
 
+/// Encode the photo for the model: on the accelerator when one is set, on the CPU when it is
+/// absent or fails (so an NPU problem never breaks AI masks).
+fn encode(m: &Sam3, npu: Option<&Accelerator>, rgb: &[u8], w: usize, h: usize) -> Result<Encoded, String> {
+    if let Some(acc) = npu {
+        match m.encode_with(rgb, w, h, acc.as_ref()) {
+            Ok(enc) => return Ok(enc),
+            Err(e) => log::warn!("the AI accelerator failed; using the CPU backbone: {e}"),
+        }
+    }
+    m.encode(rgb, w, h).map_err(|e| e.to_string())
+}
+
 /// The model and the encoded photo `job.key` (rendering and encoding it when needed).
 fn encoded<'a>(state: &'a mut State, shared: &Shared, job: &mut Job) -> Result<(&'a mut Sam3, &'a mut Encoded), String> {
     model(state, shared, &job.dir)?;
@@ -291,7 +305,7 @@ fn encoded<'a>(state: &'a mut State, shared: &Shared, job: &mut Job) -> Result<(
         let _busy = Flag::raise(&shared.encoding);
         let m = state.model.as_mut().map(|(_, m)| m).ok_or("the model did not load")?;
         let t = web_time::Instant::now();
-        let mut enc = m.encode(&input.rgb, input.w, input.h).map_err(|e| e.to_string())?;
+        let mut enc = encode(m, job.npu.as_ref(), &input.rgb, input.w, input.h)?;
         m.prepare_clicks(&mut enc).map_err(|e| e.to_string())?;
         log::info!("SAM 3 encoded {}×{} in {:?}", input.w, input.h, t.elapsed());
         state.cache = Some((job.key, enc));
@@ -347,7 +361,7 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job) -> Result<Option<S
             let input = render(job)?;
             let m = model(state, shared, &job.dir)?;
             let t = web_time::Instant::now();
-            let mut enc = m.encode(&input.rgb, input.w, input.h).map_err(|e| e.to_string())?;
+            let mut enc = encode(m, job.npu.as_ref(), &input.rgb, input.w, input.h)?;
             let (rw, rh) = (region[2] - region[0], region[3] - region[1]);
             if !(rw > 0.0 && rh > 0.0) {
                 return Ok(None);
@@ -380,7 +394,7 @@ mod tests {
     fn job(tag: Tag, reply: &mpsc::Sender<Outcome>) -> Job {
         // an empty folder: loading fails with an error (no model files)
         let dir = std::env::temp_dir().join(format!("lc-sam3-worker-none-{}", std::process::id()));
-        Job { dir, key: 1, render: None, missing: None, kind: Kind::Prepare, tag, reply: reply.clone() }
+        Job { dir, key: 1, render: None, missing: None, kind: Kind::Prepare, tag, reply: reply.clone(), npu: None }
     }
 
     #[test]

@@ -34,13 +34,14 @@ android {
         }
     }
     androidResources {
-        // The F16 checkpoint is incompressible; store it verbatim so aapt2 does not
-        // spend minutes compressing ~950 MB (and so extraction is a straight copy).
-        noCompress += listOf("safetensors")
+        // The F16 checkpoint and the QNN context binaries are incompressible; store them
+        // verbatim so aapt2 does not spend minutes compressing ~2 GB (and so extraction is
+        // a straight copy).
+        noCompress += listOf("safetensors", "bin", "so")
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    packaging { jniLibs { useLegacyPackaging = false } }
+    packaging { jniLibs { useLegacyPackaging = true } }
 }

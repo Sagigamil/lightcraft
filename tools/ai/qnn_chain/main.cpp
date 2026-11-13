@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-extern "C" int qnn_run_chain(const char* dir, const char* spec, const float* input, size_t input_floats, const char* output_path,
-                             long* encoder_ms);
+extern "C" int qnn_run_chain(const char* lib_dir, const char* dir, const char* spec, const float* input, size_t input_floats,
+                             const char* output_path, long* encoder_ms);
 
 static std::string read_text(const char* path) {
     std::ifstream f(path);
@@ -15,14 +15,14 @@ static std::string read_text(const char* path) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 5) {
-        std::fprintf(stderr, "usage: qnn_chain_test <dir> <spec.txt> <input.raw> <output.raw>\n");
+    if (argc < 6) {
+        std::fprintf(stderr, "usage: qnn_chain_test <lib dir> <context dir> <spec.txt> <input.raw> <output.raw>\n");
         return 2;
     }
-    std::string spec = read_text(argv[2]);
-    std::ifstream in(argv[3], std::ios::binary | std::ios::ate);
+    std::string spec = read_text(argv[3]);
+    std::ifstream in(argv[4], std::ios::binary | std::ios::ate);
     if (!in) {
-        std::fprintf(stderr, "cannot read %s\n", argv[3]);
+        std::fprintf(stderr, "cannot read %s\n", argv[4]);
         return 2;
     }
     auto bytes = static_cast<size_t>(in.tellg());
@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
     std::vector<float> data(bytes / sizeof(float));
     in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(bytes));
     long ms = 0;
-    int rc = qnn_run_chain(argv[1], spec.c_str(), data.data(), data.size(), argv[4], &ms);
+    int rc = qnn_run_chain(argv[1], argv[2], spec.c_str(), data.data(), data.size(), argv[5], &ms);
     std::printf("rc=%d encoder_ms=%ld\n", rc, ms);
     return rc;
 }
