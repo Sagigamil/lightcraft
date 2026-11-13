@@ -15,3 +15,5 @@ plan/
 *.safetensors
 *.safetensors.part
 tools/ai/__pycache__/
+# compiled NPU artifacts (ONNX / QNN contexts) are rebuilt by tools/ai scripts
+tools/ai/onnx/
