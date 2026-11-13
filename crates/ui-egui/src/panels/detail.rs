@@ -1319,9 +1319,17 @@ fn mask_overlay(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Respons
         {
             let n = map.norm(q);
             let exclude = ui.input(|i| i.modifiers.alt);
-            match app.run("mask.objectPoint", json!({"x": n.x, "y": n.y, "exclude": exclude})) {
+            // Android AI Object Select: a tap replaces the selection unless "Add to
+            // selection" is on; the pending mask is the one Keep/Cancel controls.
+            let pending = if cfg!(target_os = "android") { app.ui.ai_pending_mask } else { None };
+            let reset = cfg!(target_os = "android") && !app.ui.ai_add_to_selection;
+            let mut params = json!({"x": n.x, "y": n.y, "exclude": exclude, "reset": reset});
+            if let Some(mid) = pending {
+                params["id"] = json!(mid);
+            }
+            match app.run("mask.objectPoint", params) {
                 Ok(_) => {
-                    if let Some(mid) = app.session.active_mask {
+                    if let Some(mid) = pending.or(app.session.active_mask) {
                         app.ui.detail_due = Some((ui.input(|i| i.time) + 1.0, mid));
                     }
                 }

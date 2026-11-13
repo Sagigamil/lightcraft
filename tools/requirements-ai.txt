@@ -1,0 +1,8 @@
+# Python packages for tools/ai/prepare_models.py (Android AI model preparation).
+#   python -m pip install -r tools/requirements-ai.txt
+# PyTorch is only needed for the --source-pt path (Meta's sam3.pt); the official
+# --source-dir/--download paths read safetensors directly.
+numpy
+safetensors>=0.4
+huggingface_hub>=0.23
+# torch  (install separately; see docs/AI_SEGMENTATION.md)

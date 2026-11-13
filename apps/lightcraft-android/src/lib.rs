@@ -5,7 +5,7 @@
 mod app;
 
 // Reuse the desktop's bounded, loopback-only transport for emulator tests.
-#[cfg(all(target_os = "android", debug_assertions))]
+#[cfg(all(target_os = "android", any(debug_assertions, feature = "control")))]
 #[path = "../../lightcraft/src/control_server.rs"]
 mod control_server;
 pub mod gestures;

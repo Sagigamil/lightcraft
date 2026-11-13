@@ -36,6 +36,9 @@ pub enum Kind {
         prompt: Prompt,
         region: [f64; 4],
     },
+    /// Drop the model and the encoded photo (Android memory pressure; the next request loads
+    /// them again).
+    Unload,
     /// Panics (tests of the worker's recovery).
     #[cfg(test)]
     Panic,
@@ -135,6 +138,15 @@ impl Worker {
 
     pub fn loaded(&self) -> bool {
         !self.dead() && self.shared.loaded.load(Ordering::SeqCst)
+    }
+
+    /// Queue an unload of the model and the cached photo; returns at once.
+    pub fn unload(&mut self) {
+        let (reply, _) = mpsc::channel();
+        let job = Job { dir: PathBuf::new(), key: 0, render: None, missing: None, kind: Kind::Unload, tag: super::Tag::Wait, reply };
+        if let Err(e) = self.submit(job) {
+            log::warn!("could not queue the AI model unload: {e}");
+        }
     }
 
     /// Queue `job`; returns at once.
@@ -309,6 +321,12 @@ fn text_logits(model: &mut Sam3, enc: &mut Encoded, text: &str) -> Result<Option
 fn run_job(state: &mut State, shared: &Shared, job: &mut Job) -> Result<Option<SegMask>, String> {
     let side = lightcraft_segment::MASK_SIDE;
     match std::mem::replace(&mut job.kind, Kind::Prepare) {
+        Kind::Unload => {
+            *state = State::default();
+            shared.loaded.store(false, Ordering::SeqCst);
+            log::info!("SAM 3 unloaded on request (memory pressure)");
+            Ok(None)
+        }
         Kind::Prepare => {
             encoded(state, shared, job)?;
             Ok(None)

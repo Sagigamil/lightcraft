@@ -635,14 +635,17 @@ fn ai_masks_without_the_model_offer_the_download() {
     h.app.session.segmenter.dir = Some(dir.clone());
     h.app.session.segmenter.mirrors_file = Some(dir.join("none.txt"));
     let t = std::time::Instant::now();
-    let r = h.request("ui.clickWidget", json!({"id": "maskNew:object"}), T);
-    assert_eq!(r["ok"], true, "{r}");
-    assert!(develop(&h).masks.is_empty());
     if !Segmenter::AVAILABLE {
-        // a build without AI masks says so (a toast), no dialog
+        // The Lite build has no AI entries at all: no Object tile, no dialog, no mask.
+        assert!(!h.app.widgets.iter().any(|(id, _)| id == "maskNew:object"), "Lite must not show AI Object Select");
+        assert!(!h.app.widgets.iter().any(|(id, _)| id == "maskNew:prompt"), "Lite must not show Describe");
+        assert!(develop(&h).masks.is_empty());
         assert_eq!(h.app.ui.dialog, None);
         return;
     }
+    let r = h.request("ui.clickWidget", json!({"id": "maskNew:object"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(develop(&h).masks.is_empty());
     assert_eq!(h.app.ui.dialog, Some(Dialog::SamModel { then: Some(("object".into(), "new".into())), error: None }));
     assert!(!h.app.session.segmenter.download_status().running, "nothing downloads without a yes");
     if h.app.session.segmenter.mirrors().is_empty() {

@@ -133,6 +133,25 @@ pub(crate) fn clicks_of(include: &[Point], exclude: &[Point]) -> Vec<Click> {
     include.iter().map(|p| Click { at: *p, include: true }).chain(exclude.iter().map(|p| Click { at: *p, include: false })).collect()
 }
 
+/// The Object clicks a new tap leaves: a single-tap selection (`reset`, the Android AI Object
+/// Select) starts over so one tap means one object; otherwise the selection keeps growing, and
+/// clicks still on their way to the model (`pending`) count as already part of it.
+fn merge_object_clicks(
+    current: (Vec<Point>, Vec<Point>),
+    pending: Option<(Vec<Point>, Vec<Point>)>,
+    reset: bool,
+    at: Point,
+    include: bool,
+) -> (Vec<Point>, Vec<Point>) {
+    let (mut hint, mut exclude) = if reset { (Vec::new(), Vec::new()) } else { pending.unwrap_or(current) };
+    if include {
+        hint.push(at);
+    } else {
+        exclude.push(at);
+    }
+    (hint, exclude)
+}
+
 fn masks_edit(s: &mut Session, c: &str, label: &str, f: impl FnOnce(&mut Vec<Mask>, &mut Option<u32>) -> Result<()>) -> Result<Value> {
     let id = s.active().ok_or_else(|| bad(c, "no active photo"))?;
     let mut d = (*s.develop_of(id).unwrap_or_default()).clone();
@@ -338,6 +357,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     return Err(bad(c, "the point is outside the photo"));
                 }
                 let exclude = bool_or(p, "exclude", false);
+                let reset = bool_or(p, "reset", false);
                 let id = s.active().ok_or_else(|| bad(c, "no active photo"))?;
                 let mid = mask_id(p, s.active_mask, c)?;
                 let d = s.develop_of(id).unwrap_or_default();
@@ -350,18 +370,13 @@ pub fn specs() -> Vec<CommandSpec> {
                 let Some(MaskShape::Object { hint, exclude: ex, edge, .. }) = m.components.get(k).map(|x| &x.shape) else {
                     return Err(bad(c, "not an Object component"));
                 };
-                let (mut hint, mut ex, edge) = (hint.clone(), ex.clone(), *edge);
-                // clicks still on their way to the model count too
-                if let Some(pending) = s.segmenter.pending_clicks().filter(|q| (q.photo, q.mask, q.comp) == (id, mid, k)) {
-                    (hint, ex) = (pending.hint.clone(), pending.exclude.clone());
-                }
-                if hint.len() + ex.len() >= MAX_CLICKS {
+                // clicks still on their way to the model count too, unless the tap starts over
+                let pending =
+                    s.segmenter.pending_clicks().filter(|q| (q.photo, q.mask, q.comp) == (id, mid, k)).map(|q| (q.hint.clone(), q.exclude.clone()));
+                let (hint, ex) = merge_object_clicks((hint.clone(), ex.clone()), pending, reset, at, !exclude);
+                let edge = *edge;
+                if hint.len() + ex.len() > MAX_CLICKS {
                     return Err(ai_err(format!("an Object selection takes at most {MAX_CLICKS} clicks; start a new one")));
-                }
-                if exclude {
-                    ex.push(at)
-                } else {
-                    hint.push(at)
                 }
                 if s.segmenter.background && !hint.is_empty() {
                     let out = json!({"include": hint.len(), "exclude": ex.len(), "pending": true});
@@ -430,6 +445,9 @@ pub fn specs() -> Vec<CommandSpec> {
                 let g = &s.segmenter;
                 Ok(json!({
                     "available": crate::segment::Segmenter::AVAILABLE,
+                    "embedded": g.embedded,
+                    "backend": g.backend(),
+                    "textPrompts": g.text_prompts(),
                     "installed": g.installed(),
                     "dir": g.dir.as_ref().map(|d| d.display().to_string()),
                     "loaded": g.loaded(),
@@ -940,4 +958,33 @@ fn clamp_local(mut a: LocalAdjustments) -> LocalAdjustments {
     c(&mut a.color_sat, 0.0, 100.0);
     c(&mut a.amount, 0.0, 200.0);
     a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(x: f64, y: f64) -> Point {
+        Point::new(x, y)
+    }
+
+    /// One tap means one object: a tap on a new object replaces the previous clicks, while the
+    /// desktop multi-click refinement keeps adding to them (pending clicks included).
+    #[test]
+    fn a_reset_tap_starts_over_and_a_plain_tap_accumulates() {
+        let current = (vec![p(0.1, 0.1)], vec![p(0.2, 0.2)]);
+        let pending = (vec![p(0.3, 0.3), p(0.4, 0.4)], Vec::new());
+        let (hint, exclude) = merge_object_clicks(current.clone(), Some(pending.clone()), true, p(0.7, 0.8), true);
+        assert_eq!(hint, vec![p(0.7, 0.8)]);
+        assert!(exclude.is_empty(), "a new selection does not keep the old exclusions");
+
+        let (hint, exclude) = merge_object_clicks(current, Some(pending), false, p(0.7, 0.8), true);
+        assert_eq!(hint, vec![p(0.3, 0.3), p(0.4, 0.4), p(0.7, 0.8)], "clicks still reaching the model are kept");
+        assert!(exclude.is_empty());
+
+        // an exclusion adds to the exclusion list, never to the include list
+        let (hint, exclude) = merge_object_clicks((vec![p(0.5, 0.5)], Vec::new()), None, false, p(0.6, 0.6), false);
+        assert_eq!(hint, vec![p(0.5, 0.5)]);
+        assert_eq!(exclude, vec![p(0.6, 0.6)]);
+    }
 }

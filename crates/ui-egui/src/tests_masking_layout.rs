@@ -54,7 +54,16 @@ fn masking_tile_labels_fit_without_eliding_at_supported_panel_widths() {
         for width in [250.0, 270.0, 330.0, 520.0] {
             for scale in [1.0, 2.0] {
                 let (texts, widgets) = panel(width, scale, locale, false);
-                for (kind, label) in [("background", "Background"), ("luminanceRange", "Luminance"), ("prompt", "Describe")] {
+                // The AI tiles exist only in a build that can run the model (the Lite build
+                // must not show them); the layout checks below cover whichever are present.
+                let ai = lightcraft_engine::segment::Segmenter::AVAILABLE;
+                assert_eq!(widgets.iter().any(|(id, _)| id == "maskNew:object"), ai, "Object tile follows the AI build");
+                assert_eq!(widgets.iter().any(|(id, _)| id == "maskNew:prompt"), ai, "Describe tile follows the AI build");
+                let mut tiles = vec![("background", "Background"), ("luminanceRange", "Luminance")];
+                if ai {
+                    tiles.push(("prompt", "Describe"));
+                }
+                for (kind, label) in tiles {
                     crate::i18n::set_language(locale);
                     let label = crate::i18n::tr(label).to_string();
                     crate::i18n::set_language(Locale::En);

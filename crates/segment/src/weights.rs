@@ -16,6 +16,7 @@ use candle_nn::var_builder::SimpleBackend;
 use crate::{Error, Result};
 
 struct Entry {
+    dtype: DType,
     shape: Vec<usize>,
     start: u64,
     end: u64,
@@ -49,7 +50,8 @@ impl Weights {
             }
             let dtype = match v.get("dtype").and_then(|d| d.as_str()) {
                 Some("F32") => DType::F32,
-                other => return Err(Error::Model(format!("{name}: unsupported dtype {other:?} (the SAM 3 checkpoint is F32)"))),
+                Some("F16") => DType::F16,
+                other => return Err(Error::Model(format!("{name}: unsupported dtype {other:?} (expected F32 or F16)"))),
             };
             let shape: Vec<usize> = v
                 .get("shape")
@@ -67,7 +69,7 @@ impl Weights {
             if (8 + n).checked_add(end).is_none_or(|e| e > file_len) {
                 return Err(Error::Model(format!("{}: tensor {name} lies outside the file (incomplete or damaged download?)", path.display())));
             }
-            entries.insert(name, Entry { shape, start, end });
+            entries.insert(name, Entry { dtype, shape, start, end });
         }
         Ok(Arc::new(Self { file: Mutex::new(file), entries, data_start: 8 + n }))
     }
@@ -87,7 +89,11 @@ impl Weights {
             f.seek(SeekFrom::Start(self.data_start + e.start)).map_err(|err| Error::Model(format!("{name}: {err}")))?;
             f.read_exact(&mut bytes).map_err(|err| Error::Model(format!("{name}: {err}")))?;
         }
-        let v: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        let v: Vec<f32> = match e.dtype {
+            DType::F32 => bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect(),
+            DType::F16 => bytes.as_chunks::<2>().0.iter().map(|c| half::f16::from_bits(u16::from_le_bytes(*c)).to_f32()).collect(),
+            other => return Err(Error::Model(format!("{name}: unsupported dtype {other:?}"))),
+        };
         Ok(Tensor::from_vec(v, e.shape.as_slice(), &Device::Cpu)?)
     }
 }
@@ -125,6 +131,21 @@ mod tests {
         b.extend(std::iter::repeat_n(0u8, data_len));
         std::fs::write(&p, b).unwrap();
         p
+    }
+
+    #[test]
+    fn f16_tensors_are_loaded_as_f32() {
+        let p = std::env::temp_dir().join(format!("lc-weights-f16-{}.safetensors", std::process::id()));
+        let mut b = (r#"{"a":{"dtype":"F16","shape":[2,2],"data_offsets":[0,8]}}"#.len() as u64).to_le_bytes().to_vec();
+        b.extend_from_slice(br#"{"a":{"dtype":"F16","shape":[2,2],"data_offsets":[0,8]}}"#);
+        for bits in [0x3C00u16, 0x3800, 0xC000, 0x0000] {
+            b.extend_from_slice(&bits.to_le_bytes());
+        }
+        std::fs::write(&p, b).unwrap();
+        let w = Weights::open(&p).unwrap();
+        let v: Vec<f32> = w.read("a").unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(v, vec![1.0, 0.5, -2.0, 0.0]);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]

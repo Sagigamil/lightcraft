@@ -50,6 +50,14 @@ fn status_and_model_commands_without_the_model() {
     assert_eq!(st["installed"], false);
     assert_eq!(st["download"]["running"], false);
     assert!(st["license"].as_str().unwrap().contains("SAM License"));
+    // the backend is reported as it is: the Android AI build runs on the CPU, never the NPU
+    assert_eq!(st["backend"], s.segmenter.backend());
+    assert_eq!(st["embedded"], false, "the desktop app downloads the model on request");
+    assert_eq!(st["textPrompts"], s.segmenter.text_prompts());
+    // memory pressure with nothing loaded is a harmless no-op (Android calls this freely)
+    s.segmenter.release_model();
+    assert_eq!(s.segment_poll().messages, Vec::<String>::new());
+    assert_eq!(s.execute("segment.model.status", &json!({})).unwrap()["loaded"], false);
     // downloading needs the user's consent, and names the size and the licence
     let e = s.execute("segment.model.download", &json!({})).unwrap_err().to_string();
     assert!(e.contains("acknowledged") && e.contains("SAM License") && e.contains("GB"), "{e}");

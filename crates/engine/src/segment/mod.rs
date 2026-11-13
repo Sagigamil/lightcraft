@@ -118,6 +118,9 @@ pub struct DownloadStatus {
 pub struct Segmenter {
     /// Where the `facebook/sam3` files live (set by the app; `None`: no AI masks).
     pub dir: Option<PathBuf>,
+    /// The model ships inside the app (Android AI): it is extracted from the APK to `dir`
+    /// and never downloaded. Requests before extraction finishes report "preparing".
+    pub embedded: bool,
     /// The user's list of download mirrors (one base URL per line), if any.
     pub mirrors_file: Option<PathBuf>,
     /// Run requests in the background and apply them in [`Session::segment_poll`] (the
@@ -139,6 +142,7 @@ impl Default for Segmenter {
     fn default() -> Self {
         Segmenter {
             dir: None,
+            embedded: false,
             mirrors_file: None,
             background: false,
             pending: None,
@@ -156,6 +160,26 @@ impl Default for Segmenter {
 impl Segmenter {
     /// Whether this build can compute AI masks at all.
     pub const AVAILABLE: bool = cfg!(feature = "sam");
+
+    /// The inference backend this build uses. The Android AI build runs the pure-Rust SAM 3
+    /// engine on the CPU (ARM64 NEON); it never claims Hexagon NPU acceleration.
+    pub fn backend(&self) -> &'static str {
+        if !Self::AVAILABLE {
+            "none"
+        } else if cfg!(target_os = "android") {
+            "cpu"
+        } else if cfg!(target_os = "macos") {
+            "metal-or-cpu"
+        } else {
+            "cpu"
+        }
+    }
+
+    /// Whether this build embeds a text-prompt (Describe) model. The Android AI checkpoint is
+    /// point-prompt only; the desktop app uses the full checkpoint.
+    pub fn text_prompts(&self) -> bool {
+        cfg!(feature = "sam") && !cfg!(target_os = "android")
+    }
 
     /// Whether the model's files are in place.
     pub fn installed(&self) -> bool {
@@ -234,6 +258,9 @@ impl Segmenter {
         if self.installed() {
             return Ok(dir);
         }
+        if self.embedded {
+            return Err(format!("{NOT_INSTALLED} yet: the model embedded in this app is being prepared. Try again in a moment."));
+        }
         let d = self.download_status();
         if d.running {
             let pct = d.done.saturating_mul(100).checked_div(d.total).unwrap_or(0);
@@ -256,6 +283,9 @@ impl Segmenter {
         if self.installed() {
             return Ok(false);
         }
+        if self.embedded {
+            return Err("the AI model is embedded in this build; there is nothing to download".into());
+        }
         #[cfg(feature = "sam")]
         {
             let mirrors = self.mirrors();
@@ -268,6 +298,19 @@ impl Segmenter {
         {
             let _ = dir;
             Ok(false)
+        }
+    }
+
+    /// Queue an unload of the model and the cached photo (called on Android memory pressure:
+    /// they hold several GB). The next request loads them again. Does nothing when unloaded.
+    pub fn release_model(&mut self) {
+        #[cfg(feature = "sam")]
+        {
+            if self.worker.loaded() {
+                self.messages.push("The AI model was unloaded to free memory; the next selection loads it again.".into());
+                self.worker.unload();
+                self.pending = None;
+            }
         }
     }
 

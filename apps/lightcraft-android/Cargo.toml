@@ -15,6 +15,12 @@ serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 
+[features]
+# The AI flavor embeds the SAM 3 point-prompt checkpoint and enables AI masks.
+sam = ["lightcraft-engine/sam"]
+# A release build for device debugging: the loopback control channel (never shipped).
+control = []
+
 [target.'cfg(target_os = "android")'.dependencies]
 egui.workspace = true
 eframe = { workspace = true, features = ["wgpu", "android-native-activity"] }

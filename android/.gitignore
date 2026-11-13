@@ -2,3 +2,7 @@ app/build/
 .gradle/
 app/src/main/jniLibs/
 build/reports/
+app/src/ai/assets/
+app/src/ai/jniLibs/
+app/src/lite/jniLibs/
+dist/

@@ -18,6 +18,26 @@ android {
             isMinifyEnabled = false
         }
     }
+    flavorDimensions += "edition"
+    productFlavors {
+        // Lite is the existing application: no AI weights, libraries, assets or menu entries.
+        create("lite") {
+            dimension = "edition"
+            applicationId = "com.lightcraft.android"
+            versionNameSuffix = ""
+        }
+        // AI embeds the point-prompt SAM 3 checkpoint and the pure-Rust inference runtime.
+        create("ai") {
+            dimension = "edition"
+            applicationId = "com.lightcraft.android.ai"
+            versionNameSuffix = "-ai"
+        }
+    }
+    androidResources {
+        // The F16 checkpoint is incompressible; store it verbatim so aapt2 does not
+        // spend minutes compressing ~950 MB (and so extraction is a straight copy).
+        noCompress += listOf("safetensors")
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

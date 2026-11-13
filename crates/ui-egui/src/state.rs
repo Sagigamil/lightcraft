@@ -300,6 +300,12 @@ pub struct UiState {
     /// A SAM 3 download was started from the app (to report its end once).
     #[serde(skip)]
     pub sam_downloading: bool,
+    /// The mask an Android single-tap AI selection is filling, until Keep or Cancel.
+    #[serde(skip)]
+    pub ai_pending_mask: Option<u32>,
+    /// Android AI Object Select: the next tap adds to the selection instead of replacing it.
+    #[serde(skip)]
+    pub ai_add_to_selection: bool,
     /// When to start the zoomed-in detail pass of an AI mask (app time) and which mask: set by
     /// each click or description, so the pass runs once the clicking stops.
     #[serde(skip)]
@@ -609,6 +615,8 @@ impl Default for UiState {
             describe: None,
             detail_due: None,
             sam_downloading: false,
+            ai_pending_mask: None,
+            ai_add_to_selection: false,
             renaming_component: None,
             quit: false,
             dragging_photos: None,

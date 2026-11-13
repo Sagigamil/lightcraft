@@ -40,6 +40,8 @@ struct App {
     gesture: super::gestures::ViewerGesture,
     touches: usize,
     original_before: Option<lightcraft_ui_egui::state::BeforeAfter>,
+    /// An AI model extraction failure to show once (the copy runs off the UI thread).
+    model_error: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
@@ -48,6 +50,29 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
     lightcraft_engine::memory::set_budget(512 << 20);
     let mut session = Session::new().with_system_clock();
     session.open_library(dir.join("library"), false).map_err(|e| e.to_string())?;
+    // AI masks: the AI flavor embeds the point-prompt SAM 3 checkpoint in the APK. It is
+    // extracted once into app-private storage; nothing is downloaded and no network
+    // permission is needed. See MainActivity.extractModel and docs/AI_SEGMENTATION.md.
+    let model_error: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+    #[cfg(feature = "sam")]
+    {
+        session.segmenter.dir = Some(dir.join("models").join("sam3"));
+        session.segmenter.embedded = true;
+        let b = bridge.clone();
+        let error = model_error.clone();
+        std::thread::Builder::new()
+            .name("sam3-assets".into())
+            .spawn(move || match b.call(json!({"op":"extractModel"})) {
+                Ok(v) => log::info!("AI model assets ready: {v}"),
+                Err(e) => {
+                    log::error!("AI model asset extraction failed: {e}");
+                    if let Ok(mut slot) = error.lock() {
+                        *slot = Some(format!("The AI model could not be prepared: {e}"));
+                    }
+                }
+            })
+            .map_err(|e| format!("could not start AI model extraction: {e}"))?;
+    }
     let names: Names = Arc::default();
     let b = bridge.clone();
     super::sources::configure(&mut session, Arc::new(move |uri| b.read(uri)), names.clone());
@@ -124,7 +149,7 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
         "LightCraft",
         options,
         Box::new(move |cc| {
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "control"))]
             {
                 inner = inner.with_control(crate::control_server::start(7980, cc.egui_ctx.clone()));
             }
@@ -144,6 +169,7 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
                 gesture: Default::default(),
                 touches: 0,
                 original_before: None,
+                model_error,
             }))
         }),
     )
@@ -205,6 +231,12 @@ impl App {
             return;
         }
         self.last_poll = Instant::now();
+        // an AI model extraction failure (a background copy) is reported once
+        if let Ok(mut slot) = self.model_error.lock()
+            && let Some(e) = slot.take()
+        {
+            self.inner.toast_error(ctx, e);
+        }
         match self.bridge.call(json!({"op":"poll"})) {
             Ok(reply) => {
                 for event in reply.get("events").and_then(Value::as_array).into_iter().flatten() {
@@ -224,7 +256,11 @@ impl App {
                                 self.inner.toast_error(ctx, e);
                             }
                         }
-                        "memory" => self.inner.session.media.clear_sources(),
+                        "memory" => {
+                            self.inner.session.media.clear_sources();
+                            // the AI model holds several GB; load it again on the next selection
+                            self.inner.session.segmenter.release_model();
+                        }
                         "back" => {
                             let _ = self.inner.run("view.back", json!({}));
                         }

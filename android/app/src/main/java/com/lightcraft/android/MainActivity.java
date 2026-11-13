@@ -10,6 +10,10 @@ import android.provider.DocumentsContract;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -19,6 +23,7 @@ public final class MainActivity extends NativeActivity {
     private final ConcurrentLinkedQueue<JSONObject> events = new ConcurrentLinkedQueue<>();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Object sourceLock = new Object();
+    private final Object modelLock = new Object();
     private volatile boolean recursive = false;
     /** The album an "open" was for (an album's Add Photos from Folder...), -1 = none. */
     private volatile long openAlbum = -1;
@@ -193,6 +198,75 @@ public final class MainActivity extends NativeActivity {
         return null;
     }
 
+    /**
+     * Copy the embedded SAM 3 point-prompt assets out of the APK once. Every file is
+     * size- and SHA-256-verified against the packaged manifest; a .ready marker names
+     * the model hash so later launches skip the copy. Nothing is downloaded.
+     */
+    private JSONObject extractModel() throws Exception {
+        synchronized (modelLock) {
+            File dir = new File(getFilesDir(), "models/sam3");
+            if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Could not create " + dir);
+            JSONObject manifest = new JSONObject(new String(readAll(getAssets().open("sam3/manifest.json")), StandardCharsets.UTF_8));
+            JSONObject files = manifest.getJSONObject("files");
+            String modelSha = files.getJSONObject("model.safetensors").getString("sha256");
+            File ready = new File(dir, ".ready");
+            boolean current = ready.isFile() && modelSha.equals(new String(readAll(new FileInputStream(ready)), StandardCharsets.UTF_8).trim());
+            String[] required = {"manifest.json", "model.safetensors", "vocab.json", "merges.txt", "LICENSE"};
+            JSONArray copied = new JSONArray(), skipped = new JSONArray();
+            for (String name : required) {
+                File target = new File(dir, name);
+                JSONObject info = name.equals("manifest.json") ? null : files.getJSONObject(name);
+                if (current && target.isFile() && (info == null || target.length() == info.getLong("size"))) {
+                    skipped.put(name);
+                    continue;
+                }
+                copyAsset("sam3/" + name, target, info == null ? null : info.getString("sha256"));
+                copied.put(name);
+            }
+            Files.write(ready.toPath(), modelSha.getBytes(StandardCharsets.UTF_8));
+            android.util.Log.i("LightCraft", "AI model assets: " + copied.length() + " copied, " + skipped.length() + " already present");
+            return new JSONObject().put("files", copied).put("skipped", skipped);
+        }
+    }
+
+    private void copyAsset(String asset, File target, String expectedSha) throws Exception {
+        File part = new File(target.getParentFile(), target.getName() + ".part");
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream in = getAssets().open(asset); OutputStream out = new FileOutputStream(part)) {
+            byte[] buffer = new byte[1 << 20];
+            int n;
+            while ((n = in.read(buffer)) != -1) {
+                out.write(buffer, 0, n);
+                digest.update(buffer, 0, n);
+            }
+        } catch (Exception e) {
+            part.delete();
+            throw e;
+        }
+        String got = hex(digest.digest());
+        if (expectedSha != null && !expectedSha.equals(got)) {
+            part.delete();
+            throw new IOException("Embedded model file " + asset + " is damaged (SHA-256 mismatch)");
+        }
+        Files.move(part.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    private static byte[] readAll(InputStream in) throws IOException {
+        try (InputStream input = in; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int n;
+            while ((n = input.read(buffer)) != -1) out.write(buffer, 0, n);
+            return out.toByteArray();
+        }
+    }
+
+    private static String hex(byte[] bytes) {
+        StringBuilder s = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) s.append(String.format("%02x", b & 0xff));
+        return s.toString();
+    }
+
     /** Called by attached Rust worker threads; never blocks Android's main thread on IO. */
     public String bridge(String request) {
         try {
@@ -233,6 +307,7 @@ public final class MainActivity extends NativeActivity {
                         startActivity(Intent.createChooser(share, "Share edited photo"));
                     }); break;
                 }
+                case "extractModel": r.put("result", extractModel()); break;
                 case "finish": runOnUiThread(this::finish); break;
                 default: throw new IOException("Unknown Android operation");
             }

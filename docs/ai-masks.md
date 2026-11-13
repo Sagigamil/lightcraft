@@ -8,6 +8,10 @@ through Metal on macOS, on the CPU elsewhere (for now).
 Object and Describe offer to download it, every other feature (and every existing mask, see
 below) works, and no render, export or command ever waits for it.
 
+**Android:** the AI flavor embeds a point-prompt-only checkpoint in the APK (no download, no
+network), so it offers *AI Object Select* but not Describe; the Lite flavor has neither. See
+[`AI_SEGMENTATION.md`](AI_SEGMENTATION.md) for the export, packaging and build.
+
 ## Using them
 
 In the Masking panel (M):

@@ -93,9 +93,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 0, bottom: 10 }).show(ui, |ui| {
         ui.label(egui::RichText::new(crate::i18n::tr("Create New Mask")).color(t.text_dim));
         ui.add_space(6.0);
-        let tiles: [(&str, &str, Icon); 10] = [
-            ("object", "Object", Icon::Subject),
-            ("prompt", "Describe", Icon::Subject),
+        let mut tiles: Vec<(&str, &str, Icon)> = vec![
             ("subject", "Subject", Icon::Subject),
             ("sky", "Sky", Icon::Sky),
             ("background", "Background", Icon::Subject),
@@ -105,6 +103,15 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             ("luminanceRange", "Luminance", Icon::Sliders),
             ("colorRange", "Color", Icon::Picker),
         ];
+        // AI entries exist only in a build that can run the model. Android embeds the
+        // point-prompt checkpoint, so it has the tap tool but not Describe; Lite has neither.
+        if lightcraft_engine::segment::Segmenter::AVAILABLE {
+            let object = if cfg!(target_os = "android") { "AI Object Select" } else { "Object" };
+            tiles.insert(0, ("object", object, Icon::Subject));
+            if !cfg!(target_os = "android") {
+                tiles.insert(1, ("prompt", "Describe", Icon::Subject));
+            }
+        }
         // four 52 pt tiles a row when they and their labels fit, else fewer (wider for a long label)
         let widest = |size: f32| {
             let font = t.font(size);
@@ -143,7 +150,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                             app.toast(ui.ctx(), crate::i18n::tr("Click the photo to pick a colour · ⇧-click adds more"));
                         }
                         "object" => start_object(app, ui.ctx(), "new"),
-                        "prompt" => start_describe(app, "new"),
+                        "prompt" => start_describe(app, ui.ctx(), "new"),
                         "brush" | "linear" | "radial" => {
                             app.ui.tool = kind.to_string();
                             if *kind != "brush" {
@@ -176,8 +183,51 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             ui.add(egui::Label::new(egui::RichText::new(crate::i18n::tr(status)).color(t.text_dim)).wrap());
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
+        // Android AI Object Select: one tap selects, Keep/Cancel decides whether to add it.
+        #[cfg(target_os = "android")]
+        if let Some(mid) = app.ui.ai_pending_mask {
+            // Fresh settings: the AI tile above may have created the mask in this same frame,
+            // while `d` was snapshotted before its click (a stale check would clear the tool).
+            let exists = app.session.develop_of(id).is_some_and(|d| d.masks.iter().any(|m| m.id == mid));
+            if !exists {
+                app.ui.ai_pending_mask = None;
+                app.ui.tool.clear();
+            } else {
+                let busy = app.session.segmenter.busy() || app.session.segmenter.analyzing();
+                ui.add_space(6.0);
+                egui::Frame::NONE.fill(t.inset).inner_margin(egui::Margin { left: 10, right: 10, top: 8, bottom: 8 }).show(ui, |ui| {
+                    ui.label(egui::RichText::new(crate::i18n::tr("Tap an object to select it.")).color(t.text_dim));
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let mut add = app.ui.ai_add_to_selection;
+                        if ui.checkbox(&mut add, crate::i18n::tr("Add to selection")).changed() {
+                            app.ui.ai_add_to_selection = add;
+                        }
+                        if busy {
+                            ui.spinner();
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let keep = text_button(ui, "maskAiKeep", crate::i18n::tr("Keep"), false);
+                            register(ui.ctx(), "maskAiKeep", keep.rect);
+                            if keep.clicked() {
+                                app.ui.ai_pending_mask = None;
+                                app.ui.tool.clear();
+                            }
+                            let cancel = text_button(ui, "maskAiCancel", crate::i18n::tr("Cancel"), false);
+                            register(ui.ctx(), "maskAiCancel", cancel.rect);
+                            if cancel.clicked() {
+                                let _ = app.run("mask.delete", json!({"id": mid}));
+                                app.ui.ai_pending_mask = None;
+                                app.ui.tool.clear();
+                            }
+                        });
+                    });
+                });
+            }
+        }
         // the model download, while its dialog is closed
-        let download = seg.download_status();
+        let download = app.session.segmenter.download_status();
         if download.running && app.ui.dialog.is_none() {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -674,12 +724,19 @@ fn component_row_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, mask: u32, k: 
 }
 
 /// Whether the SAM 3 model is missing in a build that could use it: then the download is
-/// offered (with `then` to start afterwards) instead of starting an AI mask.
-fn needs_model(app: &mut LightcraftApp, kind: &str, op: &str) -> bool {
-    let seg = &app.session.segmenter;
-    let missing = lightcraft_engine::segment::Segmenter::AVAILABLE && seg.dir.is_some() && !seg.installed();
+/// offered (with `then` to start afterwards) instead of starting an AI mask. An embedded
+/// Android model is extracted at startup, so it is preparing rather than downloadable.
+fn needs_model(app: &mut LightcraftApp, ctx: &egui::Context, kind: &str, op: &str) -> bool {
+    let (missing, embedded) = {
+        let seg = &app.session.segmenter;
+        (lightcraft_engine::segment::Segmenter::AVAILABLE && seg.dir.is_some() && !seg.installed(), seg.embedded)
+    };
     if missing {
-        app.offer_sam_download(Some((kind, op)));
+        if embedded {
+            app.toast(ctx, crate::i18n::tr("The AI model embedded in this app is being prepared. Try again in a moment."));
+        } else {
+            app.offer_sam_download(Some((kind, op)));
+        }
     }
     missing
 }
@@ -704,18 +761,35 @@ pub(crate) fn start_object(app: &mut LightcraftApp, ctx: &egui::Context, op: &st
         }
         return;
     }
-    if needs_model(app, "object", op) {
+    if needs_model(app, ctx, "object", op) {
         return;
     }
     let r =
         if op == "new" { app.run("mask.add", json!({"kind": "object"})) } else { app.run("mask.addComponent", json!({"op": op, "kind": "object"})) };
-    match r {
-        Ok(_) => {
+    let ok = match r {
+        Ok(v) => {
+            #[cfg(not(target_os = "android"))]
+            let _ = &v;
             app.ui.tool = "object".into();
+            #[cfg(target_os = "android")]
+            {
+                let mid = v.get("activeMask").and_then(serde_json::Value::as_u64).map(|v| v as u32).or(app.session.active_mask);
+                app.ui.ai_pending_mask = mid;
+            }
             app.toast(ctx, crate::i18n::tr("Click the object to select it · ⌥-click leaves a part out"));
+            true
         }
-        Err(e) => app.ai_error(ctx, e, Some(("object", op))),
+        Err(e) => {
+            app.ai_error(ctx, e, Some(("object", op)));
+            false
+        }
+    };
+    #[cfg(target_os = "android")]
+    if ok {
+        app.toast(ctx, crate::i18n::tr("Tap an object to select it."));
     }
+    #[cfg(not(target_os = "android"))]
+    let _ = ok;
 }
 
 /// Start an AI mask of `kind` (object|prompt) combined by `op` (new|add|subtract|intersect),
@@ -739,11 +813,19 @@ pub(crate) fn begin_ai(app: &mut LightcraftApp, kind: &str, op: &str) -> Result<
 }
 
 /// Open the Describe field (a new mask, or a component combined by `op`).
-pub(crate) fn start_describe(app: &mut LightcraftApp, op: &str) {
-    if needs_model(app, "prompt", op) {
-        return;
+pub(crate) fn start_describe(app: &mut LightcraftApp, ctx: &egui::Context, op: &str) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = op;
+        app.toast(ctx, crate::i18n::tr("Describe is not available in this build."));
     }
-    app.ui.describe = Some((op.to_string(), String::new()));
+    #[cfg(not(target_os = "android"))]
+    {
+        if needs_model(app, ctx, "prompt", op) {
+            return;
+        }
+        app.ui.describe = Some((op.to_string(), String::new()));
+    }
 }
 
 /// The Describe field: type what to select ("sky", "the red car") and press Return.
@@ -799,15 +881,22 @@ fn describe_field(app: &mut LightcraftApp, ui: &mut egui::Ui, new_mask: bool) {
 }
 
 fn component_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, op: &str) {
-    let b = ui.button(crate::i18n::tr("Object"));
-    register(ui.ctx(), format!("maskComp:{op}:object"), b.rect);
-    if b.clicked() {
-        start_object(app, ui.ctx(), op);
-    }
-    let b = ui.button(crate::i18n::tr("Describe…"));
-    register(ui.ctx(), format!("maskComp:{op}:prompt"), b.rect);
-    if b.clicked() {
-        start_describe(app, op);
+    // AI entries exist only in a build that can run the model. Android embeds the
+    // point-prompt checkpoint, so it has the tap tool but not Describe; Lite has neither.
+    if lightcraft_engine::segment::Segmenter::AVAILABLE {
+        let label = if cfg!(target_os = "android") { "AI Object Select" } else { "Object" };
+        let b = ui.button(crate::i18n::tr(label));
+        register(ui.ctx(), format!("maskComp:{op}:object"), b.rect);
+        if b.clicked() {
+            start_object(app, ui.ctx(), op);
+        }
+        if !cfg!(target_os = "android") {
+            let b = ui.button(crate::i18n::tr("Describe"));
+            register(ui.ctx(), format!("maskComp:{op}:prompt"), b.rect);
+            if b.clicked() {
+                start_describe(app, ui.ctx(), op);
+            }
+        }
     }
     for (kind, label) in [
         ("brush", "Brush"),
