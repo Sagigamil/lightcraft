@@ -144,7 +144,7 @@ Device run (Lenovo Y700, SM8850P, QNN 2.50, HTP v81):
 | stem (image -> tokens) | 23.4 ms | 24.4 ms | 23.0 ms |
 | blocks 0-16 | 7 128.9 ms | 7 492 ms | 7 804 ms |
 | blocks 16-32 | 7 656.8 ms | 7 494 ms | 8 165 ms |
-| whole chain (incl. creating both 451 MB contexts) | 24 618 ms | ~31 s | 32.3 s |
+| whole chain (incl. creating both 451 MB contexts) | 24 618 ms | 31 158 ms | 32 278 ms |
 
 `rc=0`, tokens written. This is genuine Hexagon execution: the tiny control graph, single blocks
 and the chained partitions all run on the NPU, while the monolithic graph fails.
