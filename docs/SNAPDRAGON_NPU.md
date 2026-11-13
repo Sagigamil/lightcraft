@@ -79,9 +79,11 @@ The AI Hub SAM-family package (MobileSAM) explicitly forces `O=1` **"to work-aro
 --qnn_options default_graph_htp_optimizations=O=1
 ```
 
-is running. A tiny known-good CNN is also being compiled + linked for the same device as a
-control: if it runs on HTP while SAM 3 fails, the failure is model-graph-specific rather than a
-device/runtime problem.
+was run and **also fails** (~11.6 s, same err 1003), so it is not only the optimization level.
+
+Control: a tiny known-good CNN (1x3x64x64, conv+linear) was compiled, linked and run on the same
+tablet with the same QNN libs: **exit 0, 204 ms, outputs written**. The device, v81 stub/skel and
+runtime are therefore healthy; the failure is specific to the SAM 3 encoder graph.
 
 ## 6. Open items
 
@@ -94,3 +96,36 @@ device/runtime problem.
   for full resolution.
 - Package the QNN libs/context in the **AI** flavor only once HTP execution and mask accuracy are
   verified; Lite stays untouched.
+
+## 7. Subgraph isolation results (device, QNN HTP)
+
+All graphs were exported from the same checkpoint, compiled to QNN DLC and linked for
+`sm8850-ad` / HTP v81, then run on the Lenovo tablet with `qnn-net-run --retrieve_context`.
+
+| Graph | Context size | Result | Wall time |
+|---|---|---|---|
+| Tiny control CNN (1x3x64x64) | 53 KB | **pass** | 204 ms |
+| ViT block 0 (windowed attention) | 28 MB | **pass** | 885 ms |
+| ViT block 7 (global attention, 5184 tokens) | 39 MB | **pass** | 1.87 s |
+| ViT blocks 0-8 (8 blocks) | 231 MB | **pass** | 4.79 s |
+| Full SAM 3 encoder (32 blocks + neck) | 1.0 GB | **fail** | ~11 s, err 1003 |
+
+Conclusion: the failure is **not** a specific FP16 operator and **not** global attention; a single
+global-attention block executes correctly. It is **cumulative graph size / graph memory**: the full
+1.0 GB context (448.6M params) exceeds what this HTP graph can execute, and the DSP stalls ~11 s
+before returning err 1003 / adsprpc 0x8000040d.
+
+`O=1` (MobileSAM's AISW-206993 tiling workaround) was tried and did not change the outcome.
+
+### Fix direction: partition the encoder
+
+Split the encoder into sequentially executed HTP contexts that each fit the device:
+
+```text
+image -> stem (patch embed + ln_pre + pos) -> blocks 0-8 -> blocks 8-16 -> blocks 16-24
+      -> blocks 24-32 -> neck -> FPN features
+```
+
+8 blocks are proven to run (4.79 s). The exact maximum chunk size (8 vs 16) is being measured; the
+chunks are connected by ordinary tensors, so no model or mask semantics change. The CPU backend
+remains the fallback and is still the default until the partitioned HTP path is wired and verified.
