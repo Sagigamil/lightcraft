@@ -129,3 +129,37 @@ image -> stem (patch embed + ln_pre + pos) -> blocks 0-8 -> blocks 8-16 -> block
 8 blocks are proven to run (4.79 s). The exact maximum chunk size (8 vs 16) is being measured; the
 chunks are connected by ordinary tensors, so no model or mask semantics change. The CPU backend
 remains the fallback and is still the default until the partitioned HTP path is wired and verified.
+
+## 8. Working partitioned chain (verified on the tablet)
+
+A native runner (`tools/ai/qnn_chain/`) loads the three context binaries and executes them in
+sequence on the HTP, binding the graph tensors by id and passing the token tensor between stages.
+
+Device run (Lenovo Y700, SM8850P, QNN 2.50, HTP v81):
+
+| Stage | Time |
+|---|---|
+| stem (image -> tokens) | 23.4 ms |
+| blocks 0-16 | 7 128.9 ms |
+| blocks 16-32 | 7 656.8 ms |
+| whole chain (incl. loading the 2 x 231/451 MB contexts) | 24 618 ms |
+
+`rc=0`, tokens written. This is genuine Hexagon execution: the tiny control graph, single blocks
+and the chained partitions all run on the NPU, while the monolithic graph fails.
+
+Accuracy against PyTorch on the same 1008x1008 input (fp32 reference, fp16 HTP):
+
+- cosine similarity **0.998749**
+- mean absolute error **0.0359** (reference RMS 1.69, ~2 %)
+- max absolute error 80.9 on outliers (fp16 accumulation over 32 blocks)
+
+End-to-end mask IoU against the CPU path still has to be measured after the app integration.
+
+## 9. Remaining integration work
+
+1. JNI wrapper around `qnn_run_chain` + a Java `QnnEncoder` called from the existing bridge.
+2. Package the three contexts (stem 11.5 MB, blocks 0-16 231 MB, blocks 16-32 451 MB), the QNN
+   runtime libs (HTP, v81 stub/skel, System) and the JNI library in the **AI** flavor only.
+3. Rust worker: when the NPU chain is available, build `Encoded` from its token output instead of
+   running the CPU ViT; otherwise fall back to candle. The CPU neck and decoder stay unchanged.
+4. Verify masks (IoU) and latency in the app, then document the backend per component.
