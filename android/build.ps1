@@ -14,6 +14,13 @@ $key = 'CARGO_TARGET_' + $target.ToUpper().Replace('-','_') + '_LINKER'
 $oldLinker = [Environment]::GetEnvironmentVariable($key, 'Process')
 $oldTargetDir = $env:CARGO_TARGET_DIR
 [Environment]::SetEnvironmentVariable($key, (Join-Path $bin ($target + '29-clang.cmd')), 'Process')
+# crates with C code (ring, via rustls) find the NDK compiler from these
+$ccKey = 'CC_' + $target.Replace('-','_')
+$cxxKey = 'CXX_' + $target.Replace('-','_')
+$arKey = 'AR_' + $target.Replace('-','_')
+[Environment]::SetEnvironmentVariable($ccKey, (Join-Path $bin ($target + '29-clang.cmd')), 'Process')
+[Environment]::SetEnvironmentVariable($cxxKey, (Join-Path $bin ($target + '29-clang++.cmd')), 'Process')
+[Environment]::SetEnvironmentVariable($arKey, (Join-Path $bin 'llvm-ar.exe'), 'Process')
 $profile = $Configuration.ToLower()
 $dist = Join-Path $PSScriptRoot 'dist'
 New-Item -ItemType Directory -Force $dist | Out-Null
