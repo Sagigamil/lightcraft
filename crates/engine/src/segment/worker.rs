@@ -61,6 +61,10 @@ pub struct Job {
     pub npu: Option<Accelerator>,
     /// Use MobileSAM for this request (`None`: SAM 3).
     pub mobile: Option<Arc<dyn MobileSamRuntime>>,
+    /// Alternative masks of a multi-mask prompt (filled by the worker; empty otherwise).
+    pub alternatives: Vec<SegMask>,
+    /// Which alternative the worker recommends (the highest score).
+    pub selected: usize,
 }
 
 /// A finished request: the segmentation (`None`: nothing selected / nothing to report).
@@ -69,6 +73,10 @@ pub struct Outcome {
     pub result: Result<Option<SegMask>, String>,
     /// A newer request for the same selection came in; this one was skipped.
     pub superseded: bool,
+    /// Alternative masks of a multi-mask prompt (empty when there is only one).
+    pub alternatives: Vec<SegMask>,
+    /// Which alternative is the best by the model's score.
+    pub selected: usize,
 }
 
 /// Counters the session reads without locking.
@@ -147,7 +155,7 @@ impl Worker {
     /// Queue an unload of the model and the cached photo; returns at once.
     pub fn unload(&mut self) {
         let (reply, _) = mpsc::channel();
-        let job = Job { dir: PathBuf::new(), key: 0, render: None, missing: None, kind: Kind::Unload, tag: super::Tag::Wait, reply, npu: None, mobile: None };
+        let job = Job { dir: PathBuf::new(), key: 0, render: None, missing: None, kind: Kind::Unload, tag: super::Tag::Wait, reply, npu: None, mobile: None, alternatives: Vec::new(), selected: 0 };
         if let Err(e) = self.submit(job) {
             log::warn!("could not queue the AI model unload: {e}");
         }
@@ -243,7 +251,7 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration) {
         let done = Done(if is_detail { &shared.detail } else { &shared.pending });
         if queue.iter().any(|later| supersedes(later, &job)) {
             drop(done);
-            let _ = job.reply.send(Outcome { tag: job.tag, result: Ok(None), superseded: true });
+            let _ = job.reply.send(Outcome { tag: job.tag, result: Ok(None), superseded: true, alternatives: Vec::new(), selected: 0 });
             continue;
         }
         let result = match std::panic::catch_unwind(AssertUnwindSafe(|| run_job(&mut state, shared, &mut job))) {
@@ -261,7 +269,9 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration) {
         }
         shared.loaded.store(state.model.is_some(), Ordering::SeqCst);
         drop(done);
-        let _ = job.reply.send(Outcome { tag: job.tag, result, superseded: false });
+        let alternatives = std::mem::take(&mut job.alternatives);
+        let selected = job.selected;
+        let _ = job.reply.send(Outcome { tag: job.tag, result, superseded: false, alternatives, selected });
     }
 }
 
@@ -340,17 +350,27 @@ fn encoded<'a>(state: &'a mut State, shared: &Shared, job: &mut Job) -> Result<(
     }
 }
 
-/// Segment from clicks with whichever model is loaded.
-fn click_prediction(
+/// Segment from clicks with whichever model is loaded; MobileSAM returns several alternatives.
+fn click_predictions(
     model: &mut Model,
     enc: &mut Cached,
     clicks: &[lightcraft_segment::Click],
-) -> Result<lightcraft_segment::Prediction, String> {
+) -> Result<Vec<lightcraft_segment::Prediction>, String> {
     match (model, enc) {
-        (Model::Sam3(sam), Cached::Sam3(e)) => sam.segment_clicks(e, clicks).map_err(|e| e.to_string()),
+        (Model::Sam3(sam), Cached::Sam3(e)) => Ok(vec![sam.segment_clicks(e, clicks).map_err(|e| e.to_string())?]),
         (Model::Mobile(ms), Cached::Mobile(e)) => ms.segment_clicks(e, clicks).map_err(|e| e.to_string()),
         _ => Err("the AI model is inconsistent".into()),
     }
+}
+
+/// The mask with the highest model score (the first when scores tie).
+fn best_prediction(predictions: &[lightcraft_segment::Prediction]) -> usize {
+    predictions
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(0)
 }
 
 /// Every phrase of `text` ("car, road"), merged (the per-pixel maximum); `None` when nothing
@@ -387,8 +407,13 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job) -> Result<Option<S
         }
         Kind::Clicks(clicks) => {
             let (m, enc) = encoded(state, shared, job)?;
-            let p = click_prediction(m, enc, &clicks)?;
-            Ok(Some(SegMask::from_logits(side, &p.logits)))
+            let predictions = click_predictions(m, enc, &clicks)?;
+            let masks: Vec<SegMask> = predictions.iter().map(|p| SegMask::from_logits(side, &p.logits)).collect();
+            let best = best_prediction(&predictions);
+            let chosen = masks.get(best).cloned().ok_or("the model returned no mask")?;
+            job.alternatives = if masks.len() > 1 { masks } else { Vec::new() };
+            job.selected = best;
+            Ok(Some(chosen))
         }
         Kind::Text(text) => {
             let (m, enc) = encoded(state, shared, job)?;
@@ -420,7 +445,8 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job) -> Result<Option<S
                     if !inside.iter().any(|c| c.positive) {
                         return Ok(None);
                     }
-                    Some(click_prediction(m, &mut enc, &inside)?.logits)
+                    let predictions = click_predictions(m, &mut enc, &inside)?;
+                    Some(predictions[best_prediction(&predictions)].logits.clone())
                 }
                 Prompt::Text(text) => text_logits(m, &mut enc, &text)?,
             };
@@ -437,7 +463,7 @@ mod tests {
     fn job(tag: Tag, reply: &mpsc::Sender<Outcome>) -> Job {
         // an empty folder: loading fails with an error (no model files)
         let dir = std::env::temp_dir().join(format!("lc-sam3-worker-none-{}", std::process::id()));
-        Job { dir, key: 1, render: None, missing: None, kind: Kind::Prepare, tag, reply: reply.clone(), npu: None, mobile: None }
+        Job { dir, key: 1, render: None, missing: None, kind: Kind::Prepare, tag, reply: reply.clone(), npu: None, mobile: None, alternatives: Vec::new(), selected: 0 }
     }
 
     #[test]

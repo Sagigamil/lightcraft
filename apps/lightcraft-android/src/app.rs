@@ -94,8 +94,9 @@ impl lightcraft_engine::segment::MobileSamRuntime for MobileSamQnn {
         Ok(f32_values(&raw))
     }
 
-    fn decode(&self, embeddings: &[f32], points: &[(f32, f32, bool)]) -> std::result::Result<(Vec<f32>, f32), String> {
+    fn decode(&self, embeddings: &[f32], points: &[(f32, f32, bool)]) -> std::result::Result<Vec<(Vec<f32>, f32)>, String> {
         const M: usize = 256 * 256;
+        const N: usize = 4; // SAM's single-mask token plus three multimask outputs
         let mut coords = Vec::with_capacity(points.len() * 2);
         let mut labels = Vec::with_capacity(points.len());
         for (x, y, positive) in points {
@@ -116,17 +117,19 @@ impl lightcraft_engine::segment::MobileSamRuntime for MobileSamQnn {
         }))?;
         let ms = reply.get("ms").and_then(Value::as_u64).unwrap_or(0);
         let raw = std::fs::read(&self.mask).map_err(|e| format!("MobileSAM mask: {e}"))?;
-        if raw.len() != M * 4 {
-            return Err(format!("MobileSAM returned {} mask bytes, expected {}", raw.len(), M * 4));
+        if raw.len() != N * M * 4 {
+            return Err(format!("MobileSAM returned {} mask bytes, expected {}", raw.len(), N * M * 4));
         }
         let score_bytes = std::fs::read(&self.score).map_err(|e| format!("MobileSAM score: {e}"))?;
-        if score_bytes.len() != 4 {
-            return Err("MobileSAM returned no score".into());
+        if score_bytes.len() != N * 4 {
+            return Err("MobileSAM returned no scores".into());
         }
-        let score = f32::from_le_bytes([score_bytes[0], score_bytes[1], score_bytes[2], score_bytes[3]]);
+        let masks = f32_values(&raw);
+        let scores = f32_values(&score_bytes);
         log::info!("MobileSAM decoder: {ms} ms");
-        Ok((f32_values(&raw), score))
+        Ok((0..N).map(|i| (masks[i * M..(i + 1) * M].to_vec(), scores[i])).collect())
     }
+
 }
 
 pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {

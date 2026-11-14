@@ -83,7 +83,7 @@ function Build-Edition([string]$edition) {
         Copy-Item -LiteralPath (Join-Path $repo 'tools/ai/mobilesam/manifest.json') -Destination (Join-Path $qnnAssets 'manifest.json') -Force
         $artifacts = @{
             'encoder_ctx.bin' = Join-Path $repo 'tools/ai/mobilesam/ctx/encoder_ctx.bin'
-            'decoder8_cpu.bin' = Join-Path $repo 'tools/ai/mobilesam/decoder8_cpu.bin'
+            'decoder8m_cpu.bin' = Join-Path $repo 'tools/ai/mobilesam/decoder8m_cpu.bin'
         }
         $mobileManifest = Get-Content -LiteralPath (Join-Path $repo 'tools/ai/mobilesam/manifest.json') -Raw | ConvertFrom-Json
         foreach ($artifact in $artifacts.Keys) {

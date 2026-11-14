@@ -31,7 +31,7 @@ pub trait MobileSamRuntime: Send + Sync {
 
     /// `embeddings`: the encoder output. `points`: up to [`MAX_POINTS`] `(x, y, positive)` in the
     /// 1024 frame. Returns the 256 × 256 mask logits and the model's IoU logit.
-    fn decode(&self, embeddings: &[f32], points: &[(f32, f32, bool)]) -> std::result::Result<(Vec<f32>, f32), String>;
+    fn decode(&self, embeddings: &[f32], points: &[(f32, f32, bool)]) -> std::result::Result<Vec<(Vec<f32>, f32)>, String>;
 }
 
 /// A MobileSAM model backed by an external runtime.
@@ -67,18 +67,30 @@ impl MobileSam {
     }
 
     /// Segment from clicks (normalized to the photo; the first [`MAX_POINTS`] are used).
-    pub fn segment_clicks(&self, enc: &Encoded, clicks: &[Click]) -> Result<Prediction> {
+    ///
+    /// Returns the decoder's mask alternatives (the single-mask token is dropped, leaving SAM's
+    /// three multimask outputs); the caller picks one, usually the highest score.
+    pub fn segment_clicks(&self, enc: &Encoded, clicks: &[Click]) -> Result<Vec<Prediction>> {
         if !clicks.iter().any(|c| c.positive) {
             return Err(Error::Model("no positive click".into()));
         }
         let used: Vec<&Click> = clicks.iter().take(MAX_POINTS).collect();
         let points: Vec<(f32, f32, bool)> =
             used.iter().map(|c| (c.x.clamp(0.0, 1.0) * enc.width as f32, c.y.clamp(0.0, 1.0) * enc.height as f32, c.positive)).collect();
-        let (mask, score) = self.runtime.decode(&enc.embeddings, &points).map_err(Error::Model)?;
-        if mask.len() != MASK * MASK {
-            return Err(Error::Model(format!("the MobileSAM decoder returned {} values, expected {}", mask.len(), MASK * MASK)));
+        let decoded = self.runtime.decode(&enc.embeddings, &points).map_err(Error::Model)?;
+        if decoded.is_empty() {
+            return Err(Error::Model("the MobileSAM decoder returned no masks".into()));
         }
-        Ok(Prediction { logits: to_grid(&mask, enc.width, enc.height), score: sigmoid(score) })
+        // The first output is SAM's single-mask token; the rest are the multimask alternatives.
+        let skip = if decoded.len() > 1 { 1 } else { 0 };
+        let mut out = Vec::with_capacity(decoded.len() - skip);
+        for (mask, score) in decoded.iter().skip(skip) {
+            if mask.len() != MASK * MASK {
+                return Err(Error::Model(format!("the MobileSAM decoder returned {} values, expected {}", mask.len(), MASK * MASK)));
+            }
+            out.push(Prediction { logits: to_grid(mask, enc.width, enc.height), score: sigmoid(*score) });
+        }
+        Ok(out)
     }
 
     /// The embeddings (tests).
@@ -188,5 +200,54 @@ mod tests {
         assert_eq!(grid.len(), GRID * GRID);
         assert!(grid[GRID * GRID / 2] > 0.0);
         assert!(grid[GRID * GRID - 1] < 0.0);
+    }
+
+    struct MockRuntime {
+        image: std::sync::Mutex<Vec<f32>>,
+        points: std::sync::Mutex<Vec<(f32, f32, bool)>>,
+    }
+
+    impl MobileSamRuntime for MockRuntime {
+        fn encode(&self, image: &[f32]) -> std::result::Result<Vec<f32>, String> {
+            *self.image.lock().unwrap() = image.to_vec();
+            Ok(vec![0.0; 64 * 64 * 256])
+        }
+
+        fn decode(
+            &self,
+            _embeddings: &[f32],
+            points: &[(f32, f32, bool)],
+        ) -> std::result::Result<Vec<(Vec<f32>, f32)>, String> {
+            *self.points.lock().unwrap() = points.to_vec();
+            Ok((0..4).map(|i| (vec![i as f32; MASK * MASK], i as f32)).collect())
+        }
+    }
+
+    #[test]
+    fn letterboxes_a_wide_photo_and_scales_prompts_to_the_content() {
+        let mock = std::sync::Arc::new(MockRuntime {
+            image: std::sync::Mutex::new(Vec::new()),
+            points: std::sync::Mutex::new(Vec::new()),
+        });
+        let model = MobileSam::new(mock.clone());
+        let rgb = vec![255u8; 200 * 100 * 3];
+        let enc = model.encode(&rgb, 200, 100).unwrap();
+        {
+            let image = mock.image.lock().unwrap();
+            assert_eq!(image.len(), IMAGE * IMAGE * 3);
+            // the content is white and sits at the top; the bottom half is the pixel-mean pad
+            assert!((image[0] - 1.0).abs() < 1e-6);
+            let pad = (600 * IMAGE + 10) * 3;
+            assert!((image[pad] - PIXEL_MEAN[0]).abs() < 1e-6);
+        }
+        let predictions = model.segment_clicks(&enc, &[Click { x: 0.5, y: 0.25, positive: true }]).unwrap();
+        // four outputs, the first is the single-mask token: three alternatives remain
+        assert_eq!(predictions.len(), 3);
+        assert_eq!(predictions[0].logits.len(), GRID * GRID);
+        let points = mock.points.lock().unwrap();
+        let (x, y, positive) = points[0];
+        assert!((x - 512.0).abs() < 1e-3, "x {x}");
+        assert!((y - 128.0).abs() < 1e-3, "y {y}");
+        assert!(positive);
     }
 }

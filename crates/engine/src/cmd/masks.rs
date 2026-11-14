@@ -303,6 +303,36 @@ pub fn specs() -> Vec<CommandSpec> {
             })
         }),
         cmd!(
+            "mask.selectOption",
+            "Choose Mask Option",
+            [],
+            None,
+            "{id?, component?: index (0), index: alternative index} - select one of a multi-mask AI selection's alternatives",
+            has_active,
+            |s, p| {
+                let c = "mask.selectOption";
+                let comp = p.get("component").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let index = p.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let mid = mask_id(p, s.active_mask, c)?;
+                let photo = s.active().ok_or_else(|| bad(c, "no active photo"))?;
+                let options = s.mask_options(photo, mid, comp).cloned().ok_or_else(|| bad(c, "no alternatives for this mask"))?;
+                let seg = options.options.get(index).cloned().ok_or_else(|| bad(c, "no such mask option"))?;
+                masks_edit(s, c, "Choose Mask Option", |masks, _| {
+                    let i = find(masks, mid, c)?;
+                    let component = masks[i].components.get_mut(comp).ok_or_else(|| bad(c, "no such component"))?;
+                    match &mut component.shape {
+                        MaskShape::Object { seg: current, .. } | MaskShape::Prompt { seg: current, .. } => *current = Some(seg.clone()),
+                        _ => return Err(bad(c, "the component is not an AI selection")),
+                    }
+                    Ok(())
+                })?;
+                if let Some(o) = s.mask_options.get_mut(&(photo.0, mid, comp)) {
+                    o.selected = index;
+                }
+                Ok(json!({"selected": index}))
+            }
+        ),
+        cmd!(
             "mask.sampleColor",
             "Sample Mask Color",
             [],

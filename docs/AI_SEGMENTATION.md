@@ -1,16 +1,21 @@
-# AI Object Select on Android (SAM 3 point prompts)
+# AI Object Select on Android (SAM 3 / MobileSAM point prompts)
 
 Lightcraft AI adds **AI Object Select** to the existing Masking panel: tap an object in the
 photo and get an editable mask for that specific object. It runs entirely offline on the tablet,
 using the same mask representation, rendering, adjustments, history and persistence as every
 other Lightcraft mask.
 
+> **Android AI edition:** it runs **MobileSAM** (ViT-T): the encoder on the Hexagon NPU through
+> QNN/HTP, the 8-point prompt decoder on the QNN CPU backend, three mask alternatives and a
+> letterboxed 1024x1024 input. The SAM 3 model described below is the desktop engine (and the
+> previous Android checkpoint); see `docs/MOBILESAM_NPU.md` for the MobileSAM path and numbers.
+
 Two separately buildable APKs are produced:
 
 | APK | Application ID | AI model | Notes |
 |---|---|---|---|
 | `Lightcraft-Lite.apk` | `com.lightcraft.android` | none | The existing app; no AI libraries, weights, assets or menu entries. |
-| `Lightcraft-AI.apk` | `com.lightcraft.android.ai` | embedded SAM 3 point-prompt checkpoint | AI Object Select; fully offline; no network permission. |
+| `Lightcraft-AI.apk` | `com.lightcraft.android.ai` | embedded MobileSAM (QNN contexts) | AI Object Select with 3 mask alternatives; fully offline; no network permission. |
 
 ## 1. Selected model and why
 
@@ -40,15 +45,13 @@ visual-prompt components (`tracker.sam_prompt_encoder.*`, `tracker.sam_mask_deco
 keeps exactly those (plus the shared ViT and the point-tracker neck) and drops the text encoder
 and the DETR detector head. Nothing is substituted: this is SAM 3's own interactive segmenter.
 
-**Runtime/backend:** on Android the vision encoder's 32-layer ViT runs on the **Hexagon NPU**
-through QNN/HTP (stem + two 16-block context binaries, fp16); the neck, prompt encoder, tracker
-and mask decoder remain the pure-Rust candle engine on the CPU (F16 weights, F32 compute). The app
-reports `backend: "npu+cpu"`. The CPU backbone is the fallback: if the NPU chain fails to load or
-run, the same photo is encoded on the CPU and the mask is computed as before. Desktop builds use
-Metal (macOS) or the CPU. The Lite edition has no AI code at all.
-
-The NPU path is documented in `docs/SNAPDRAGON_NPU.md`: tokens match the CPU backbone with cosine
-0.99875 and the resulting masks agree with the CPU path at IoU 0.9996.
+**Runtime/backend:** the Android AI edition runs **MobileSAM** through QNN: the ViT-T image
+encoder on the Hexagon HTP (2.5-2.65 s per photo) and the 8-point prompt decoder on the QNN CPU
+backend (60-95 ms per click, three mask alternatives). The photo is letterboxed to 1024x1024
+(longest side resized, the rest padded with SAM's pixel mean), never stretched or cropped. The app
+reports `backend: "npu+cpu"`. Desktop builds use SAM 3 with Metal (macOS) or the CPU, and the Lite
+edition has no AI code at all. See `docs/MOBILESAM_NPU.md` (MobileSAM) and
+`docs/SNAPDRAGON_NPU.md` (the earlier SAM 3 NPU work).
 
 ## 2. Checkpoint source, version and licence
 

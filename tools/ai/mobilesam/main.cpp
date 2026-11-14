@@ -1,4 +1,4 @@
-// On-device test driver for the MobileSAM QNN runner.
+// On-device test driver for the MobileSAM QNN runner (4 mask options per prompt).
 
 #include <cstdio>
 #include <cstring>
@@ -12,6 +12,9 @@ extern "C" int mobilesam_run_points(const char* lib_dir, const char* dir, const 
 extern "C" int mobilesam_run_prompt(const char* lib_dir, const char* dir, const float* image, size_t image_floats,
                                     const float* coords, const float* labels, size_t num_points, float* masks, float* scores,
                                     long* encoder_ms, long* decoder_ms);
+
+constexpr size_t kOptions = 4;
+constexpr size_t kMask = 256 * 256;
 
 static std::vector<float> read_f32(const char* path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -36,7 +39,7 @@ static bool write_f32(const std::string& path, const std::vector<float>& v) {
 static void report(const char* label, const float* mask, float score) {
     float lo = mask[0], hi = mask[0];
     size_t positive = 0;
-    for (size_t i = 0; i < 256 * 256; ++i) {
+    for (size_t i = 0; i < kMask; ++i) {
         lo = mask[i] < lo ? mask[i] : lo;
         hi = mask[i] > hi ? mask[i] : hi;
         positive += mask[i] > 0.0f ? 1 : 0;
@@ -61,25 +64,32 @@ int main(int argc, char** argv) {
     long enc_ms = 0, dec_ms = 0;
     int rc = 0;
     if (prompt) {
-        std::vector<float> masks(256 * 256), scores(1);
+        std::vector<float> masks(kOptions * kMask), scores(kOptions);
         rc = mobilesam_run_prompt(argv[1], argv[2], image.data(), image.size(), points.data(), labels.data(), n, masks.data(),
                                   scores.data(), &enc_ms, &dec_ms);
         std::printf("rc=%d prompt points=%zu encoder_ms=%ld decoder_ms=%ld\n", rc, n, enc_ms, dec_ms);
         if (rc != 0) return rc;
-        report("prompt", masks.data(), scores[0]);
+        for (size_t i = 0; i < kOptions; ++i) {
+            char label[32];
+            std::snprintf(label, sizeof(label), "mask %zu", i);
+            report(label, masks.data() + i * kMask, scores[i]);
+        }
         if (!write_f32(std::string(argv[6]) + "/masks.raw", masks)) return 3;
         if (!write_f32(std::string(argv[6]) + "/scores.raw", scores)) return 3;
         return 0;
     }
-    std::vector<float> masks(n * 256 * 256), scores(n);
+    std::vector<float> masks(n * kOptions * kMask), scores(n * kOptions);
     rc = mobilesam_run_points(argv[1], argv[2], image.data(), image.size(), points.data(), n, labels.data(), masks.data(),
                               scores.data(), &enc_ms, &dec_ms);
     std::printf("rc=%d points=%zu encoder_ms=%ld decoder_total_ms=%ld\n", rc, n, enc_ms, dec_ms);
     if (rc != 0) return rc;
     for (size_t p = 0; p < n; ++p) {
-        char label[64];
-        std::snprintf(label, sizeof(label), "point %zu (%.1f, %.1f) label %.0f", p, points[2 * p], points[2 * p + 1], labels[p]);
-        report(label, masks.data() + p * 256 * 256, scores[p]);
+        for (size_t i = 0; i < kOptions; ++i) {
+            char label[64];
+            std::snprintf(label, sizeof(label), "point %zu (%.1f, %.1f) label %.0f mask %zu", p, points[2 * p], points[2 * p + 1],
+                          labels[p], i);
+            report(label, masks.data() + (p * kOptions + i) * kMask, scores[p * kOptions + i]);
+        }
     }
     if (!write_f32(std::string(argv[6]) + "/masks.raw", masks)) return 3;
     if (!write_f32(std::string(argv[6]) + "/scores.raw", scores)) return 3;

@@ -398,7 +398,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     egui::Popup::menu(&more).show(|ui| component_row_menu(app, ui, m.id, i, &label, m.components.len()));
                 });
             });
-            range_controls(app, ui, i, &c.shape);
+            range_controls(app, ui, id, m.id, i, &c.shape);
         }
         ui.add_space(6.0);
         // wraps: the five actions are wider than a narrow panel
@@ -542,7 +542,7 @@ fn overlay_options(app: &mut LightcraftApp, ui: &mut egui::Ui) {
 
 /// Controls for a range component: the selected range (two handles over a dark → light bar),
 /// Smoothness, and Show Luminance Map; colour ranges get Refine.
-fn range_controls(app: &mut LightcraftApp, ui: &mut egui::Ui, comp: usize, shape: &MaskShape) {
+fn range_controls(app: &mut LightcraftApp, ui: &mut egui::Ui, photo: PhotoId, mask: u32, comp: usize, shape: &MaskShape) {
     let t = Tokens::get(ui.ctx());
     let update = |app: &mut LightcraftApp, shape: MaskShape| {
         let _ = app.run("mask.update", json!({"component": comp, "shape": shape}));
@@ -647,6 +647,20 @@ fn range_controls(app: &mut LightcraftApp, ui: &mut egui::Ui, comp: usize, shape
                 }
                 app.run("mask.update", json!({"component": comp, "shape": s}))
             });
+            let alternatives = app.session.mask_options(photo, mask, comp).map(|o| (o.options.len(), o.selected));
+            if let Some((count, selected)) = alternatives {
+                if count > 1 {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(crate::i18n::tr("Mask option")).color(t.text_dim).size(11.5));
+                        for k in 0..count {
+                            let label = format!("{}", k + 1);
+                            if text_button(ui, &format!("maskOption{comp}_{k}"), &label, k == selected).clicked() && k != selected {
+                                let _ = app.run("mask.selectOption", json!({"id": mask, "component": comp, "index": k}));
+                            }
+                        }
+                    });
+                }
+            }
             ui.label(egui::RichText::new(crate::i18n::tr("− harder border · + softer border")).color(t.text_dim).size(11.0));
         }
         MaskShape::ColorRange { samples, refine } => {

@@ -6,12 +6,15 @@ Object mask sends every positive and negative click at once.  This exports the s
 8 prompt slots (unused slots are padded with label -1), keeping the encoder and the mask
 semantics identical.
 
+By default the decoder returns **three mask alternatives** (`multimask_output=True`, the SAM
+behaviour); pass `--single-mask` for the original artifact's single choice.
+
 The wrapper keeps the artifact's external layouts: image embeddings are NHWC [1,64,64,256] (the
-encoder's output) and the mask is NHWC [1,256,256,1].  Everything in between is the original
-decoder.
+encoder's output) and the masks are NHWC [1,256,256,3] with scores [1,3] (or [1,1] for
+`--single-mask`).  Everything in between is the original decoder.
 
 Usage:
-    python tools/ai/export_mobilesam_decoder.py --out tools/ai/mobilesam/decoder8.onnx
+    python tools/ai/export_mobilesam_decoder.py --out tools/ai/mobilesam/decoder8m.onnx
 
 The MobileSAM checkpoint (mobile_sam.pt, 40.7 MB, Apache-2.0) is downloaded once by
 qai_hub_models to ~/.qaihm.
@@ -35,6 +38,7 @@ class DecoderNHWC(nn.Module):
     def forward(self, image_embeddings, point_coords, point_labels):
         x = image_embeddings.permute(0, 3, 1, 2).contiguous()
         masks, scores = self.decoder(x, point_coords, point_labels)
+        # [B, K, 256, 256] -> [B, 256, 256, K]
         return masks.permute(0, 2, 3, 1).contiguous(), scores
 
 
@@ -42,11 +46,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True)
     ap.add_argument("--points", type=int, default=8, help="prompt slots (unused: label -1)")
+    ap.add_argument("--single-mask", action="store_true", help="select one mask instead of three")
     args = ap.parse_args()
 
     from qai_hub_models.models.mobilesam.model import MobileSAMDecoder
 
-    decoder = MobileSAMDecoder.from_pretrained(single_mask_mode=True).eval()
+    decoder = MobileSAMDecoder.from_pretrained(single_mask_mode=args.single_mask).eval()
     model = DecoderNHWC(decoder).eval()
 
     n = args.points

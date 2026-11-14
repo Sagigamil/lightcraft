@@ -38,6 +38,7 @@ namespace {
 constexpr size_t kPromptSlots = 8;
 constexpr size_t kEmbeddingFloats = 64 * 64 * 256;
 constexpr size_t kMaskFloats = 256 * 256;
+constexpr size_t kMaskOptions = 4;  // SAM's three multimask outputs plus the single-mask token
 
 struct Engine {
     void* lib = nullptr;
@@ -219,11 +220,11 @@ bool decode(Engine& dec_engine, Context& dec_ctx, const std::vector<float>& embe
         {22, "point_labels", {1, 8}, l.data(), l.size() * sizeof(float)},
     };
     std::vector<Output> outs = {
-        {486, "scores", {1, 1}, scores, sizeof(float)},
-        {487, "masks", {1, 256, 256, 1}, masks, kMaskFloats * sizeof(float)},
+        {474, "scores", {1, 4}, scores, kMaskOptions * sizeof(float)},
+        {475, "masks", {1, 256, 256, 4}, masks, kMaskOptions * kMaskFloats * sizeof(float)},
     };
     double ms = 0;
-    if (!run_graph(dec_engine, dec_ctx, "decoder8", ins, outs, &ms)) return false;
+    if (!run_graph(dec_engine, dec_ctx, "decoder8m", ins, outs, &ms)) return false;
     LOGI("decoder %.1f ms", ms);
     if (decoder_ms) *decoder_ms = static_cast<long>(ms);
     return true;
@@ -255,7 +256,7 @@ bool ensure_session(const char* lib_dir, const char* dir) {
         return false;
     }
     if (!open_context(g_encoder, dir, "encoder_ctx.bin", g_session.enc_ctx)) return false;
-    if (!open_context(g_decoder, dir, "decoder8_cpu.bin", g_session.dec_ctx)) return false;
+    if (!open_context(g_decoder, dir, "decoder8m_cpu.bin", g_session.dec_ctx)) return false;
     g_session.embeddings.assign(kEmbeddingFloats, 0.0f);
     g_session.ready = true;
     LOGI("MobileSAM ready (HTP encoder + CPU decoder)");
@@ -311,8 +312,8 @@ extern "C" int mobilesam_run_points(const char* lib_dir, const char* dir, const 
     for (size_t p = 0; p < num_points; ++p) {
         float label = labels[p];
         long ms = 0;
-        if (!decode(g_decoder, g_session.dec_ctx, g_session.embeddings, &points[2 * p], &label, 1, masks + p * kMaskFloats,
-                    scores + p, &ms)) {
+        if (!decode(g_decoder, g_session.dec_ctx, g_session.embeddings, &points[2 * p], &label, 1,
+                    masks + p * kMaskOptions * kMaskFloats, scores + p * kMaskOptions, &ms)) {
             return -6;
         }
         total += ms;
@@ -359,13 +360,13 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_lightcraft_android_MobileSam_decode(
     if (!read_f32_file(labels_path, labels) || labels.size() != points.size() / 2) return -23;
     if (!ensure_session(lib.c_str(), dir.c_str())) return -24;
     g_session.embeddings = std::move(embeddings);
-    std::vector<float> masks(kMaskFloats), scores(1);
+    std::vector<float> masks(kMaskFloats * kMaskOptions), scores(kMaskOptions);
     long ms = 0;
     if (!decode(g_decoder, g_session.dec_ctx, g_session.embeddings, points.data(), labels.data(), labels.size(), masks.data(),
                 scores.data(), &ms)) {
         return -25;
     }
     if (!write_f32_file(mask_path, masks.data(), masks.size() * sizeof(float))) return -26;
-    if (!write_f32_file(score_path, scores.data(), sizeof(float))) return -27;
+    if (!write_f32_file(score_path, scores.data(), scores.size() * sizeof(float))) return -27;
     return static_cast<jlong>(ms);
 }

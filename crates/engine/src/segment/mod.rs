@@ -487,6 +487,8 @@ impl Session {
             reply,
             npu: self.segmenter.npu.clone(),
             mobile: self.segmenter.mobile.clone(),
+            alternatives: Vec::new(),
+            selected: 0,
         })
     }
 
@@ -636,7 +638,7 @@ impl Session {
                 self.segment_queue(id, kind, tag, Some(region))?;
             } else {
                 let patch = self.segment_wait(id, kind, Some(region))?;
-                let outcome = worker::Outcome { tag, result: Ok(patch), superseded: false };
+                let outcome = worker::Outcome { tag, result: Ok(patch), superseded: false, alternatives: Vec::new(), selected: 0 };
                 let mut polled = Polled::default();
                 self.apply_outcome(outcome, &mut polled);
             }
@@ -693,6 +695,12 @@ impl Session {
                     Ok(None) => return,
                     Err(e) => return polled.messages.push(e),
                 };
+                if o.alternatives.len() > 1 {
+                    let options = o.alternatives;
+                    self.mask_options.insert((photo.0, mask, comp), crate::MaskOptions { photo, options, selected: o.selected });
+                } else {
+                    self.mask_options.remove(&(photo.0, mask, comp));
+                }
                 let Some(d) = self.develop_of(photo) else { return };
                 let mut d = (*d).clone();
                 let Some(c) = d.masks.iter_mut().find(|m| m.id == mask).and_then(|m| m.components.get_mut(comp)) else { return };
@@ -707,6 +715,9 @@ impl Session {
                 }
             }
             Tag::NewPrompt { photo, mask, op, name, text } => {
+                if let Some(mask) = mask {
+                    self.mask_options.retain(|key, _| !(key.0 == photo.0 && key.1 == mask));
+                }
                 let seg = match o.result {
                     Ok(Some(seg)) => seg,
                     Ok(None) => return polled.messages.push(format!("Nothing matching “{text}” was found in this photo.")),

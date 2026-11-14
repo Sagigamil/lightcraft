@@ -129,6 +129,15 @@ pub struct Interaction {
     pub original: Arc<DevelopSettings>,
 }
 
+/// The mask alternatives of a multi-mask AI selection (the option buttons on a mask). Session
+/// state only: the chosen mask is what the develop settings store.
+#[derive(Clone, Debug)]
+pub struct MaskOptions {
+    pub photo: PhotoId,
+    pub options: Vec<lightcraft_develop::SegMask>,
+    pub selected: usize,
+}
+
 /// Source of [`Session::visible_shared`] generations (process-wide, so two sessions never share one).
 static VISIBLE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -170,6 +179,8 @@ pub struct Session {
     pub meta_clipboard: Option<Value>,
     /// The photo that was active before the current one (Paste Settings from Previous).
     pub previous_active: Option<PhotoId>,
+    /// Alternatives of the last multi-mask selection, per (photo, mask, component).
+    pub(crate) mask_options: std::collections::HashMap<(u64, u32, usize), MaskOptions>,
     /// Groups last used for Copy (Lightroom remembers them).
     pub copy_groups: Vec<lightcraft_develop::SettingsGroup>,
     pub presets: Vec<lightcraft_develop::Preset>,
@@ -271,6 +282,7 @@ impl Session {
             browse: None,
             library_folder: None,
             previous_active: None,
+            mask_options: std::collections::HashMap::new(),
             copy_groups: lightcraft_develop::SettingsGroup::default_copy(),
             presets: presets::builtin(),
             profile_favorites: Vec::new(),
@@ -307,6 +319,11 @@ impl Session {
             smart_previews_dir: None,
             forget_local_days: lightcraft_catalog::DEFAULT_FORGET_DAYS,
         }
+    }
+
+    /// The alternatives of a multi-mask selection on `photo` (mask `mask`, component `comp`).
+    pub fn mask_options(&self, photo: PhotoId, mask: u32, comp: usize) -> Option<&MaskOptions> {
+        self.mask_options.get(&(photo.0, mask, comp))
     }
 
     /// A session with the procedurally generated demo library loaded.
