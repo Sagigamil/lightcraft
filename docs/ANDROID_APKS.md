@@ -50,28 +50,21 @@ message when one is missing, so a partial checkout cannot produce a broken AI AP
 
 - `.github/workflows/android-ci.yml` builds **Lite** on every push to `main` (and manually). It
   needs no SDK or model binaries, so it stays green on a clean checkout.
-- `.github/workflows/android-ai.yml` is **manual** (`workflow_dispatch`) and builds SAM3 and/or
-  MobileSAM. It downloads a bundle from the `AI_BUNDLE_URL` repository secret and runs
-  `build.ps1` on `windows-latest`.
+- `.github/workflows/android-ai.yml` is **manual** (`workflow_dispatch`) and builds **MobileSAM**.
+  It downloads the QNN SDK 2.50.0.260828 from Qualcomm's public software centre and the two
+  MobileSAM contexts from the `MOBILESAM_CTX_URL` repository secret, then runs
+  `build.ps1 -Edition MobileSAM` on `windows-latest`.
 
-The bundle is a zip extracted at the repository root:
+The `MOBILESAM_CTX_URL` zip contains, at its root:
 
 ```
-qnn-sdk/                                  # the QAIRT SDK root
-  include/QNN/...
-  lib/aarch64-android/...
-  lib/hexagon-v81/unsigned/libQnnHtpV81Skel.so
-tools/ai/onnx/ends/stem_context.bin
-tools/ai/onnx/blocks0_16/blocks0_16_context.bin
-tools/ai/onnx/blocks16_32/blocks16_32_context.bin
-tools/ai/mobilesam/ctx/encoder_ctx.bin
-tools/ai/mobilesam/decoder8m_cpu.bin
-android/app/src/sam3/assets/sam3/{manifest.json,model.safetensors,vocab.json,merges.txt,LICENSE}
+encoder_ctx.bin
+decoder8m_cpu.bin
 ```
 
-Only include the parts the requested edition needs. The SAM 3 bundle is roughly 2 GB (0.95 GB
-checkpoint + 0.96 GB contexts) plus the QNN SDK; the MobileSAM bundle is roughly 60 MB plus the
-QNN SDK.
+SAM 3 is not built in CI: it needs the 0.95 GB point-prompt checkpoint plus the three chained
+QNN contexts (0.96 GB), which are not committed. Build it locally with
+`build.ps1 -Edition SAM3` after preparing the assets (see above).
 
 ## Credentials
 

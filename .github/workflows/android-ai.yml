@@ -1,37 +1,23 @@
-name: Android AI builds
+name: Android MobileSAM build
 
-# The AI flavors embed Qualcomm QNN runtimes and Meta/Qualcomm model binaries that are not in
-# the repository (licences and size). This manual workflow fetches them from the secret
-# AI_BUNDLE_URL and builds the requested APK. The regular Android CI builds only Lite.
+# MobileSAM needs the Qualcomm QNN SDK and the two compiled context binaries. Neither is in
+# the repository (licence and size), so this manual workflow downloads them and builds the
+# MobileSAM APK. The regular Android CI builds Lite; SAM 3 is not built here.
 #
-# The bundle is a zip extracted at the repository root with this layout:
+# Required repository secret:
+#   MOBILESAM_CTX_URL  a zip with encoder_ctx.bin and decoder8m_cpu.bin at its root
 #
-#   qnn-sdk/                                  the QAIRT/QNN SDK root (include/QNN, lib/aarch64-android,
-#                                             lib/hexagon-v81/unsigned)
-#   tools/ai/onnx/ends/stem_context.bin
-#   tools/ai/onnx/blocks0_16/blocks0_16_context.bin
-#   tools/ai/onnx/blocks16_32/blocks16_32_context.bin
-#   tools/ai/mobilesam/ctx/encoder_ctx.bin
-#   tools/ai/mobilesam/decoder8m_cpu.bin
-#   android/app/src/sam3/assets/sam3/{manifest.json,model.safetensors,vocab.json,merges.txt,LICENSE}
-#
-# See docs/ANDROID_APKS.md.
+# The QNN SDK is downloaded from Qualcomm's public software centre (2.50.0.260828, the version
+# the contexts were compiled with). See docs/ANDROID_APKS.md.
 
 on:
   workflow_dispatch:
-    inputs:
-      edition:
-        description: Which edition(s) to build
-        required: true
-        type: choice
-        options: [All, SAM3, MobileSAM]
-        default: All
 
 permissions:
   contents: read
 
 concurrency:
-  group: android-ai-${{ github.ref }}-${{ inputs.edition }}
+  group: android-mobilesam-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -39,10 +25,11 @@ env:
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
   ANDROID_NDK_VERSION: "28.2.13676358"
+  QNN_SDK_URL: "https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/2.50.0.260828/v2.50.0.260828.zip"
 
 jobs:
-  build-ai:
-    name: Build AI APK (${{ inputs.edition }})
+  build-mobilesam:
+    name: Build MobileSAM APK
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,45 +53,59 @@ jobs:
             Move-Item (Join-Path $sdk "cmdline-tools\cmdline-tools") (Join-Path $sdk "cmdline-tools\latest") -Force
             $sdkmanager = Join-Path $sdk "cmdline-tools\latest\bin\sdkmanager.bat"
           }
+          ("y`n" * 20) | & $sdkmanager --licenses --sdk_root="$sdk" | Out-Null
           & $sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;$env:ANDROID_NDK_VERSION" --sdk_root="$sdk"
           "ANDROID_HOME=$sdk" >> $env:GITHUB_ENV
           "ANDROID_SDK_ROOT=$sdk" >> $env:GITHUB_ENV
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ci-android-ai-${{ inputs.edition }}
+          key: ci-android-mobilesam
 
-      - name: Fetch the AI artifacts bundle
+      - name: Fetch the QNN SDK
+        shell: pwsh
+        run: |
+          $zip = "D:\qnn-sdk.zip"
+          curl.exe -sS -L -A "Mozilla/5.0" --retry 3 --retry-delay 5 -o $zip $env:QNN_SDK_URL
+          if (-not (Test-Path $zip) -or (Get-Item $zip).Length -lt 1GB) {
+            throw "The QNN SDK download failed or is truncated: $zip"
+          }
+          New-Item -ItemType Directory -Force "D:\qnn" | Out-Null
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, "D:\qnn")
+          $qnn = Get-ChildItem "D:\qnn" -Recurse -Directory -Filter QNN |
+            Where-Object { $_.FullName -match 'include\\QNN$' } | Select-Object -First 1
+          if (-not $qnn) { throw "The QNN SDK has no include/QNN directory." }
+          $root = Split-Path (Split-Path $qnn.FullName) -Parent
+          "QNN_SDK_ROOT=$root" >> $env:GITHUB_ENV
+          Write-Output "QNN_SDK_ROOT=$root"
+
+      - name: Fetch the MobileSAM contexts
         shell: pwsh
         env:
-          AI_BUNDLE_URL: ${{ secrets.AI_BUNDLE_URL }}
+          MOBILESAM_CTX_URL: ${{ secrets.MOBILESAM_CTX_URL }}
         run: |
-          if (-not $env:AI_BUNDLE_URL) {
-            throw "Add the AI_BUNDLE_URL repository secret: a zip with the layout in docs/ANDROID_APKS.md."
+          if (-not $env:MOBILESAM_CTX_URL) {
+            throw "Add the MOBILESAM_CTX_URL repository secret: a zip with encoder_ctx.bin and decoder8m_cpu.bin (see docs/ANDROID_APKS.md)."
           }
-          Invoke-WebRequest -Uri $env:AI_BUNDLE_URL -OutFile (Join-Path $env:RUNNER_TEMP "ai-bundle.zip")
-          Expand-Archive (Join-Path $env:RUNNER_TEMP "ai-bundle.zip") -DestinationPath $env:GITHUB_WORKSPACE -Force
-          if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE "qnn-sdk/include/QNN/QnnInterface.h"))) {
-            throw "The bundle has no qnn-sdk/include/QNN (see docs/ANDROID_APKS.md)."
-          }
+          $zip = Join-Path $env:RUNNER_TEMP "mobilesam-ctx.zip"
+          Invoke-WebRequest -Uri $env:MOBILESAM_CTX_URL -OutFile $zip
+          $out = Join-Path $env:RUNNER_TEMP "mobilesam-ctx"
+          Expand-Archive $zip -DestinationPath $out -Force
+          New-Item -ItemType Directory -Force "tools\ai\mobilesam\ctx" | Out-Null
+          Copy-Item (Join-Path $out "encoder_ctx.bin") "tools\ai\mobilesam\ctx\encoder_ctx.bin" -Force
+          Copy-Item (Join-Path $out "decoder8m_cpu.bin") "tools\ai\mobilesam\decoder8m_cpu.bin" -Force
 
-      - name: Build the APK
+      - name: Build the MobileSAM APK
         shell: pwsh
-        env:
-          QNN_SDK_ROOT: ${{ github.workspace }}\qnn-sdk
-        run: |
-          .\android\build.ps1 -Edition "${{ inputs.edition }}" -Configuration Release
+        run: .\android\build.ps1 -Edition MobileSAM -Configuration Release
 
       - name: Upload the APK
         uses: actions/upload-artifact@v4
         with:
-          name: lightcraft-ai-${{ inputs.edition }}-${{ github.sha }}
-          path: |
-            android/dist/Lightcraft-SAM3.apk
-            android/dist/Lightcraft-MobileSAM.apk
-          if-no-files-found: ignore
+          name: lightcraft-mobilesam-${{ github.sha }}
+          path: android/dist/Lightcraft-MobileSAM.apk
           retention-days: 14
