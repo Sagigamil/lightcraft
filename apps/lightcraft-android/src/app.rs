@@ -308,6 +308,14 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
     }
     // a tablet cannot hover: show the eye on every Edit section header
     inner.ui.touch_ui = true;
+    // The tablet is narrow: the Presets column (300 pt) pushed the Tools column off the edge,
+    // which made Edit unusable. Edit gets the full right dock; the library folds away in Detail.
+    inner.ui.presets = false;
+    inner.ui.left_width = 200.0;
+    inner.ui.right_width = 300.0;
+    if matches!(inner.ui.view, lightcraft_ui_egui::state::ViewMode::Detail) {
+        inner.ui.left_panel = false;
+    }
     let destination = bridge.call(json!({"op":"exportDestination"}))?;
     super::storage::set_export_destination(&mut inner, destination.get("value").and_then(Value::as_str).unwrap_or_default());
     let mut options = eframe::NativeOptions { android_app: Some(android), ..Default::default() };

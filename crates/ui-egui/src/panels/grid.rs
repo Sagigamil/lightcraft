@@ -291,6 +291,7 @@ pub fn rows_between(rows: &[GridRow], top: f32, bottom: f32) -> &[GridRow] {
 }
 
 fn show_inner(app: &mut LightcraftApp, ui: &mut egui::Ui) {
+    handle_pinch_zoom(app, ui);
     let (generation, ids) = app.session.visible_shared();
     // header: source title + count
     let sel_n = app.session.selection.ids.len();
@@ -566,6 +567,22 @@ pub struct GridRow {
 
 /// The grouping actually shown: `Auto` is days with large thumbnails, months with medium ones and
 /// years when zoomed far out.
+/// Pinch-to-zoom in the grid: two fingers scale the thumbnails (the bottom size slider follows).
+fn handle_pinch_zoom(app: &mut LightcraftApp, ui: &mut egui::Ui) {
+    let factor = ui.input(|i| i.zoom_delta());
+    if !factor.is_finite() || factor <= 0.0 || (factor - 1.0).abs() < 0.01 {
+        return;
+    }
+    const MIN: f32 = 90.0;
+    const MAX: f32 = 480.0;
+    let new_size = (app.ui.thumb_size * factor).clamp(MIN, MAX);
+    if (new_size - app.ui.thumb_size).abs() < 0.5 {
+        return;
+    }
+    app.ui.thumb_size = new_size;
+    ui.ctx().request_repaint();
+}
+
 pub fn resolve_group(by: GroupBy, thumb_size: f32) -> GroupBy {
     match by {
         GroupBy::Auto if thumb_size >= 150.0 => GroupBy::Day,

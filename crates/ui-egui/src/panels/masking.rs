@@ -94,7 +94,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 0, bottom: 10 }).show(ui, |ui| {
         ui.label(egui::RichText::new(crate::i18n::tr("Create New Mask")).color(t.text_dim));
         ui.add_space(6.0);
-        let tiles: [(&str, &str, Icon); 10] = [
+        let mut tiles: Vec<(&str, &str, Icon)> = vec![
             ("object", "Object", Icon::Subject),
             ("prompt", "Describe", Icon::Subject),
             ("subject", "Subject", Icon::Subject),
@@ -106,6 +106,16 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             ("luminanceRange", "Luminance", Icon::Sliders),
             ("colorRange", "Color", Icon::Picker),
         ];
+        // A build without the model has no AI tiles; the Android AI edition embeds the
+        // point-prompt (MobileSAM) checkpoint, so it has Object but not Describe.
+        if !lightcraft_engine::segment::Segmenter::AVAILABLE {
+            tiles.retain(|(k, _, _)| !matches!(*k, "object" | "prompt"));
+        } else if cfg!(target_os = "android") {
+            tiles.retain(|(k, _, _)| *k != "prompt");
+            if let Some(t) = tiles.iter_mut().find(|(k, _, _)| *k == "object") {
+                t.1 = "AI Object Select";
+            }
+        }
         // four 52 pt tiles a row when they and their labels fit, else fewer (wider for a long label)
         let widest = |size: f32| {
             let font = t.font(size);
