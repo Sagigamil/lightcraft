@@ -219,12 +219,18 @@ bool decode(Engine& dec_engine, Context& dec_ctx, const std::vector<float>& embe
         {4, "point_coords", {1, 8, 2}, c.data(), c.size() * sizeof(float)},
         {22, "point_labels", {1, 8}, l.data(), l.size() * sizeof(float)},
     };
+    // The graph returns NHWC [1, 256, 256, 4]: the four mask logits of a pixel are adjacent.
+    // The app reads one contiguous plane per option, so de-interleave after the run.
+    std::vector<float> interleaved(kMaskFloats * kMaskOptions);
     std::vector<Output> outs = {
         {474, "scores", {1, 4}, scores, kMaskOptions * sizeof(float)},
-        {475, "masks", {1, 256, 256, 4}, masks, kMaskOptions * kMaskFloats * sizeof(float)},
+        {475, "masks", {1, 256, 256, 4}, interleaved.data(), kMaskOptions * kMaskFloats * sizeof(float)},
     };
     double ms = 0;
     if (!run_graph(dec_engine, dec_ctx, "decoder8m", ins, outs, &ms)) return false;
+    for (size_t p = 0; p < kMaskFloats; ++p) {
+        for (size_t k = 0; k < kMaskOptions; ++k) masks[k * kMaskFloats + p] = interleaved[p * kMaskOptions + k];
+    }
     LOGI("decoder %.1f ms", ms);
     if (decoder_ms) *decoder_ms = static_cast<long>(ms);
     return true;
