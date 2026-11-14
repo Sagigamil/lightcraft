@@ -275,16 +275,8 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
     let sync_writer = writer.clone();
     let b = bridge.clone();
     let destination_bridge = bridge.clone();
-    let exists_bridge = bridge.clone();
     let services = Services {
-        export_exists: Some(Arc::new(move |path| {
-            exists_bridge
-                .call(json!({"op":"exportExists", "name":super::storage::export_name(path).unwrap_or("")}))
-                .ok()
-                .and_then(|v| v.get("exists").and_then(Value::as_bool))
-                .unwrap_or(false)
-        })),
-        pick_export_folder: Some(Box::new(move || {
+        pick_folder: Some(Box::new(move || {
             let _ = destination_bridge.call(json!({"op":"destination"}));
             None
         })),
@@ -295,7 +287,7 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
             vec![]
         })),
         // an album's Add Photos from Folderג€¦ comes back to us (`request_folder_import`): SAF picks
-        host_folder_import: true,
+        // album folder import uses the host's picker
         ..Default::default()
     };
     let mut inner = LightcraftApp::new(session, services);
@@ -312,7 +304,7 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
         }
     } else {
         inner.ui.settings.memory_mb = 512;
-        inner.ui.settings.preview_edge = 2048;
+        inner.ui.settings.preview_limit = 1600;
     }
     // a tablet cannot hover: show the eye on every Edit section header
     inner.ui.touch_ui = true;
@@ -569,7 +561,7 @@ impl eframe::App for App {
                 }
             }
         }
-        self.inner.raw_input_hook(raw);
+        self.inner.raw_input_hook(ctx, raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();

@@ -2,11 +2,17 @@
 
 LightCraft selects objects with **SAM 3** (Segment Anything with Concepts, Meta 2025), run in
 pure Rust by `crates/segment` on [candle](https://github.com/huggingface/candle): on the GPU
-through Metal on macOS, on the CPU elsewhere (for now).
+through Metal on macOS, on the CPU elsewhere (for now). If the Mac's GPU can't run it, it runs on
+the CPU (see the worker below).
 
 **The model is optional.** It is not part of LightCraft, and nothing requires it: without it,
-Object and Describe offer to download it, every other feature (and every existing mask, see
-below) works, and no render, export or command ever waits for it.
+Object, Describe and Lens Blur's **Find Subject** offer to download it, every other feature (and
+every existing mask, see below) works, and no render, export or command ever waits for it.
+
+Lens Blur reuses this same optional SAM 3 model for **Find Subject**; it does not add or download a
+separate model. The automatic subject estimate used before Find Subject finishes (or when **Auto**
+is selected) uses existing person mattes when available, otherwise a local saliency heuristic, so
+that fallback does not require SAM 3.
 
 **Android:** the AI flavor embeds a point-prompt-only checkpoint in the APK (no download, no
 network), so it offers *AI Object Select* but not Describe; the Lite flavor has neither. See
@@ -20,13 +26,26 @@ In the Masking panel (M):
   to leave it out. Clicks show as green (include) and red (leave out) dots.
 - **Describe**: type what to select — `sky`, `trees`, `the red car` — and press Return. Every
   instance the model finds (score above 0.5) joins the mask; if nothing matches, nothing is
-  created and you are told so.
+  created and you are told so. Around what it found, the mask follows the model's semantic mask
+  for the phrase, which is sure inside and runs on where two instances touch (the instances'
+  own masks alone left a sky or a net about 70–90 % selected and a thin line between two people
+  side by side).
 - Several things at once: `car, road` (comma-separated) selects each and merges them.
 - **+ / −** under the selected mask (and the Add / Subtract / Intersect menus) combine
   selections: Describe `car`, click the mask, + ▸ Describe… `road`; − ▸ Describe… `people` takes
   the people out of a sky mask; − ▸ Object then clicks remove one object.
 - **Edge** (per selection, −100…100): below 0 a crisper border, above 0 a feathered one (up to 2 %
   of the long edge, so previews and exports match).
+- **Edges follow the photo** (issue #3272): the model's grid (288² over the whole photo) has
+  ~20 px cells on a 24 MP export, so a plain enlargement put the mask's edge up to a cell off the
+  subject's and a raised Exposure drew a bright outline around it. Where the grid is coarser than
+  the output, the mask's logits are guided-filtered by the photo's log luminance (the fast guided
+  filter, a window of 1.5 grid cells, so a preview and an export put the edge in the same place):
+  near the edge the selection follows the photo's tones, ≈ 0 a pixel or two outside a subject that
+  stands out from its background and ≈ 1 inside. Pixels whose surroundings are all in or all out,
+  and edges the photo has no contrast across, keep the plain enlargement. Refine Edges then works
+  on the combined mask and finds these edges in place. Cost on an M2 Pro, per AI selection: +22 ms
+  and +12 MB at 24 MP, +46 ms and +17 MB at 60 MP, +7.5 ms on a 2.7 MP preview.
 - **Detail:** about a second after the last click (or right after a description), the photo
   around the selection is analyzed again, zoomed in, from a sharper source (~5 s on an M4 Pro,
   in the background); the result is kept as a high-resolution patch (at most 4 per selection),
@@ -46,13 +65,51 @@ The result is stored with the mask: the model's 288 × 288 mask logits over the 
 need the model, so masks survive moving the library to a machine without it, and the web build
 renders them. Editing the photo's look later does not recompute a mask (click again to update).
 
+## Remote Metal inference
+
+Native builds with `sam` can keep the editor, RAW files, library, and exports local while
+a Mac runs SAM 3. Build both ends from the same revision. On the Mac, install the model
+as described below, then run:
+
+```sh
+cargo build --release --locked -p lightcraft-segment --bin lightcraft-sam3-worker
+target/release/lightcraft-sam3-worker "$HOME/Library/Application Support/LightCraft/models/sam3" 127.0.0.1:8793
+```
+
+On the editing computer, start an SSH tunnel in one terminal and LightCraft in another:
+
+```sh
+ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:8793:127.0.0.1:8793 user@your-mac
+LIGHTCRAFT_SAM3_REMOTE=127.0.0.1:8793 lightcraft
+```
+
+Object clicks, Describe prompts, detail refinement and Lens Blur's Find Subject (people and animals,
+from the camera's focus point when the file records it) use the remote worker; a worker older than the
+app rejects a request it doesn't know with an error, so update both together. Only the
+rendered model input (long edge at most 1008 pixels) and prompts cross the tunnel. The
+worker caches the current photo; detail crops do not replace that cache. Returned masks
+stay in the local library, so later adjustments and exports work without the connection.
+
+The worker requires Metal and accepts one editing connection at a time. It loads weights
+on demand and releases them when the client disconnects or remains idle for ten minutes.
+Both endpoints require loopback addresses: SSH provides authentication and encryption.
+The listener has no independent authentication; do not expose it through a public proxy. Any
+process of any user on the worker Mac can connect to it, and on the editing computer a local
+process listening on the port while the tunnel is down receives the rendered model input, so use
+this only on machines whose local users you trust.
+
+No local weights are required in remote mode. An unavailable worker produces an explicit
+error, not a silent CPU fallback. Restore the tunnel and retry. Unset
+`LIGHTCRAFT_SAM3_REMOTE` to use the local model again. This offloads segmentation only,
+not RAW development, denoising, or upscaling. The model licence below still applies.
+
 ## Getting the model
 
 ### In the app (recommended)
 
-The first time you pick Object or Describe without the model, LightCraft asks:
+The first time you pick Object, Describe or Lens Blur's Find Subject without the model, LightCraft asks:
 
-> **Download the SAM 3 model?** Object and Describe masks use SAM 3, Meta's segmentation model.
+> **Download the SAM 3 model?** Object, Describe and Lens Blur's Find Subject use SAM 3, Meta's segmentation model.
 > It isn't part of LightCraft, and everything else works without it. Download it once (about
 > 3.4 GB) · *folder*. Licence: SAM License (Meta) — Meta's terms, not LightCraft's. Downloading
 > it means accepting them. [Read the SAM License] — **Not Now** / **Download**
@@ -79,7 +136,7 @@ The model is fetched from an ordered list of mirrors: base URLs where `<base>/mo
 2. the file `models/sam3-mirrors.txt` in LightCraft's settings folder (one URL per line, `#`
    comments) — `~/Library/Application Support/LightCraft/` (macOS), `%APPDATA%\LightCraft\`
    (Windows), `~/.config/lightcraft/` (Linux);
-3. the built-in list, `DEFAULT_MIRRORS` in `crates/segment/src/fetch/mod.rs`.
+3. the built-in list, `DEFAULT_MIRRORS` in `crates/segment/src/fetch.rs`.
 
 > **Maintainers:** the built-in list is **empty** until LightCraft's own CDN locations exist
 > (see the `TODO(maintainer)` there): add them in order of preference, host the three files
@@ -107,7 +164,9 @@ the Mozilla root certificates; no OpenSSL, `ring` or `aws-lc`, nothing compiled 
 ### By hand
 
 Put `model.safetensors`, `vocab.json` and `merges.txt` from `facebook/sam3` in the model folder:
-`models/sam3/` in the settings folder above, or the folder `LIGHTCRAFT_SAM3_DIR` names. Developers
+`models/sam3/` in the settings folder above, or the folder `LIGHTCRAFT_SAM3_DIR` names. It must be
+the Hugging Face format (3,439,938,512 bytes): `sam3.safetensors` from community mirrors, renamed, is
+Meta's original checkpoint, and LightCraft says so instead of loading it. Developers
 can use the installer scripts, which download from Hugging Face with your token and verify the
 weights:
 
@@ -154,9 +213,16 @@ Therefore:
 | `mask.objectPoint` | `{x, y, exclude?: bool, id?}` | one click on the selected mask's Object selection (≤ 64 clicks) |
 | `mask.refineDetail` | `{id?, component?}` | the zoomed-in detail pass → `{started}` |
 | `segment.prepare` | `{}` | load the model and analyze the active photo → `{busy}` |
-| `segment.model.status` | `{}` | `{available, installed, dir, loaded, busy, analyzing, sizeBytes, license, licenseUrl, mirrors, download}` |
+| `segment.model.status` | `{}` | `{available, installed, remote, dir, loaded, busy, analyzing, sizeBytes, license, licenseUrl, mirrors, download}` |
 | `segment.model.download` | `{acknowledged: true}` | start the download in the background → `{started}` |
 | `segment.model.cancel` | `{}` | stop it (it resumes next time) → `{cancelled}` |
+
+`remote` reports the configured endpoint, not its health. `installed` describes local weights only.
+`download` is `{running, done, total, file, error, cancelled, finished}`: `cancelled` is true when the last
+download was cancelled (its `error` says so in words; decide on the flag). An AI mask command refused because
+the model is not installed (or still downloading) fails with an error that starts with "The SAM 3 model is
+not installed"; inside LightCraft it is `ErrorKind::ModelMissing(Sam3)`, which is what the app offers the
+download on.
 
 Coordinates are normalized to the uncropped, oriented photo, like every mask shape. `seg` passes
 a stored segmentation (as `mask.list` / the develop settings hold it): the mask is made without
@@ -175,7 +241,7 @@ wait and return the result (when built with the `sam` feature; the default CLI h
   `NOTICE` — the ported files say so and that they were modified): the 32-layer ViT backbone
   with 2-D RoPE and windowed attention, the feature pyramids, the SAM 2-style prompt encoder and
   two-way mask decoder for clicks, and the CLIP text encoder, DETR encoder/decoder (box
-  relative-position bias, presence token) and pixel decoder for text. The CLIP tokenizer is a
+  relative-position bias, presence token), pixel decoder and semantic head for text. The CLIP tokenizer is a
   small BPE in `tokenizer.rs`. The downloader (original code) is the `lightcraft-fetch` crate, shared by any model that is downloaded; `fetch/` here says what SAM 3 needs.
 - candle is pinned at 0.9.2: later releases make `candle-core` depend on `tokenizers` with the
   Oniguruma C library, and the product is pure Rust. Weights are read with positional reads (no
@@ -186,9 +252,16 @@ wait and return the result (when built with the `sam` feature; the default CLI h
   encoded photo; the session sends it jobs and receives results over channels, never holding a
   lock the model holds. Each job runs under `catch_unwind`: a panic inside candle becomes an
   error and the model is reloaded on the next request; busy counters are reset by drop guards.
+- GPU fallback (issue #1974): a job that fails on the GPU (a panic or a candle error, e.g. an
+  AMD GPU in an Intel Mac whose Metal compiler crashes on a matmul kernel) frees the model and runs
+  once more on the CPU. If that works, the model stays on the CPU until LightCraft restarts and
+  the user is told once ("The GPU couldn't run the AI mask model…"); if the CPU fails too, the
+  error is reported and the next job tries the GPU again. Missing or damaged model files and
+  remote-worker errors are not retried. `LIGHTCRAFT_GPU=0` or `LIGHTCRAFT_GPU_BACKEND=off` keep
+  the model on the CPU from the start.
 - Hostile documents: a selection keeps at most 4 detail patches (when read and when rendered),
   each at most 1024² logits; more than 64 clicks are never sent to the model.
-- Accuracy: `crates/segment/tests/reference.rs` compares every stage against the Python
+- Accuracy: `crates/segment/tests/it/reference.rs` compares every stage against the Python
   reference (`tools/sam3_reference.py`); on Metal the backbone matches to 7e-5 relative error
   and masks to ~5e-5. f16 was tried and rejected (overflow, ~7 % faster).
 - The engine feature `sam` (on in the desktop app, off for web and CLI) gates the model; without

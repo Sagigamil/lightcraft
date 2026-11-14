@@ -11,13 +11,14 @@
 //! dimensionless scales), so a 400 px preview and a full-size export are warped identically.
 //!
 //! Also here: automatic lateral chromatic aberration estimation ([`estimate_lateral_ca`]) and [`defringe`].
-//! Profile corrections use only lens data embedded in the files: DNG `WarpRectilinear` / `FixVignetteRadial`, and the
-//! raw readers' equivalent of a camera's own correction (Panasonic / Leica RW2 distortion).
+//! Profile corrections use lens data embedded in the files (DNG `WarpRectilinear` / `WarpRectilinear2` /
+//! `FixVignetteRadial`, and the raw readers' equivalent of a camera's own correction, e.g. Panasonic / Leica RW2
+//! distortion), or a lens database profile in the same form (`lightcraft_lensdb`).
 
 use std::sync::Mutex;
 
 use lightcraft_color::perceptual::{oklab_from_2020, oklab_to_2020};
-use lightcraft_develop::{DevelopSettings, EmbeddedLens, EmbeddedVignette, EmbeddedWarp};
+use lightcraft_develop::{DevelopSettings, EmbeddedLens, EmbeddedVignette, EmbeddedWarp, EmbeddedWarpStage};
 use lightcraft_geom::{Affine, Homography, Interval, Orientation, Point, Real};
 use lightcraft_raster::{Plane, Rgb32f};
 
@@ -103,7 +104,13 @@ impl Warp {
         self.persp != Homography::IDENTITY
             || self.k1 != 0.0
             || self.ca.iter().any(|c| *c != 0.0)
-            || (self.lens_dist != 0.0 && self.lens.is_some_and(|l| l.warp.is_some()))
+            || (self.lens_dist != 0.0 && self.lens.is_some_and(|l| l.warp.is_some() || l.has_stages()))
+    }
+
+    /// Whether the embedded lens warp is a `WarpRectilinear2` chain, whose degree-14 polynomials are ill-conditioned
+    /// in `f32` (terms of 1e5 cancelling to 1): a renderer that works in `f32` must sample on the CPU.
+    pub fn needs_f64(&self) -> bool {
+        self.lens_dist != 0.0 && self.lens.is_some_and(|l| l.has_stages())
     }
 
     /// Whether the colour planes are sampled at different positions.
@@ -111,6 +118,8 @@ impl Warp {
         self.ca[0] != self.ca[1]
             || self.ca[1] != self.ca[2]
             || (self.lens_dist != 0.0 && self.lens.and_then(|l| l.warp).is_some_and(|w| w.planes[0] != w.planes[1] || w.planes[1] != w.planes[2]))
+            || (self.lens_dist != 0.0
+                && self.lens.is_some_and(|l| l.stages.iter().flatten().any(|s| s.planes[0] != s.planes[1] || s.planes[1] != s.planes[2])))
     }
 
     pub fn has_gain(&self) -> bool {
@@ -170,6 +179,16 @@ impl Warp {
             let (sx, sy) = embedded_warp_real(&wp, qx, qy, ch, self.w, self.h);
             (qx, qy) = (qx + (sx - qx) * self.lens_dist, qy + (sy - qy) * self.lens_dist);
         }
+        if self.lens_dist != 0.0
+            && let Some(l) = self.lens.filter(|l| l.has_stages())
+        {
+            // each opcode warps the image the one before it made, so the last one maps the output position first
+            let (mut sx, mut sy) = (qx, qy);
+            for st in l.stages.iter().rev().flatten() {
+                (sx, sy) = embedded_stage_real(st, sx, sy, ch, self.w, self.h);
+            }
+            (qx, qy) = (qx + (sx - qx) * self.lens_dist, qy + (sy - qy) * self.lens_dist);
+        }
         let k = self.ca[ch];
         if k != 0.0 {
             (qx, qy) = ((qx - c.x) * (1.0 + k) + c.x, (qy - c.y) * (1.0 + k) + c.y);
@@ -180,6 +199,39 @@ impl Warp {
     /// Transformed px → source px for plane `ch`.
     pub fn to_source(&self, p: Point, ch: usize) -> Point {
         self.corrected_to_source(self.to_corrected(p), ch)
+    }
+
+    /// Source px → transformed px (green plane): the inverse of [`Warp::to_source`], by Newton's
+    /// method on it (the warps are smooth and close to the identity, so a few steps reach a
+    /// hundredth of a pixel). `None` when it doesn't converge (a point far outside a strong warp).
+    pub fn from_source(&self, s: Point) -> Option<Point> {
+        if !(s.x.is_finite() && s.y.is_finite()) {
+            return None;
+        }
+        let f = |p: Point| self.to_source(p, 1);
+        // start from where the perspective alone puts it (the lens part moves pixels little)
+        let mut t = self.from_corrected(s);
+        let h = 1e-3 * self.w.max(self.h).max(1.0);
+        for _ in 0..24 {
+            let v = f(t);
+            let (ex, ey) = (v.x - s.x, v.y - s.y);
+            if !(ex.is_finite() && ey.is_finite()) {
+                return None;
+            }
+            if ex.abs() < 1e-4 && ey.abs() < 1e-4 {
+                return Some(t);
+            }
+            let (dx, dy) = (f(Point::new(t.x + h, t.y)), f(Point::new(t.x, t.y + h)));
+            let (a, c) = ((dx.x - v.x) / h, (dx.y - v.y) / h);
+            let (b, d) = ((dy.x - v.x) / h, (dy.y - v.y) / h);
+            let det = a * d - b * c;
+            if !det.is_finite() || det.abs() < 1e-12 {
+                return None;
+            }
+            t = Point::new(t.x - (d * ex - b * ey) / det, t.y - (a * ey - c * ex) / det);
+        }
+        let v = f(t);
+        ((v.x - s.x).abs() < 1e-2 && (v.y - s.y).abs() < 1e-2).then_some(t)
     }
 
     /// Vignetting compensation gain at source position `src` (px).
@@ -280,6 +332,33 @@ fn embedded_warp_real<T: Real>(wp: &EmbeddedWarp, x: T, y: T, ch: usize, w: f64,
     (sx * m + cx, sy * m + cy)
 }
 
+/// DNG `WarpRectilinear2` source position for corrected position `p` (px) and plane `ch`.
+pub fn embedded_stage(st: &EmbeddedWarpStage, p: Point, ch: usize, w: f64, h: f64) -> Point {
+    let (x, y) = embedded_stage_real(st, p.x, p.y, ch, w, h);
+    Point::new(x, y)
+}
+
+/// [`embedded_stage`] for any [`Real`]: DNG specification 1.6.0.0, "WarpRectilinear2" — the radial term is
+/// `f(clamp(r, min_valid_radius, max_valid_radius))` with `f(r) = Σ krₚ rᵖ` (p = 0..14), used as `d·f` or, with
+/// `reciprocalRadial`, `d/f`; the tangential terms are those of `WarpRectilinear` (with the unclamped `r`).
+fn embedded_stage_real<T: Real>(st: &EmbeddedWarpStage, x: T, y: T, ch: usize, w: f64, h: f64) -> (T, T) {
+    let (cx, cy) = (st.center.x * w, st.center.y * h);
+    let m = (st.radius * w.max(h)).max(1e-9);
+    let k = &st.planes[ch.min(2)];
+    let dx = (x - cx) / m;
+    let dy = (y - cy) / m;
+    let r2 = dx * dx + dy * dy;
+    let r = r2.sqrt_nonneg().clamp_range(k[17], k[18]);
+    let mut f = r * k[14] + k[13];
+    for &c in k[..13].iter().rev() {
+        f = f * r + c;
+    }
+    let (rx, ry) = if st.reciprocal { (dx / f, dy / f) } else { (dx * f, dy * f) };
+    let sx = rx + dx * (k[15] * 2.0) * dy + (r2 + dx * 2.0 * dx) * k[16];
+    let sy = ry + dx * (k[16] * 2.0) * dy + (r2 + dy * 2.0 * dy) * k[15];
+    (sx * m + cx, sy * m + cy)
+}
+
 /// DNG `FixVignetteRadial` gain at source position `p` (px).
 pub fn embedded_vignette_gain(v: &EmbeddedVignette, p: Point, w: f64, h: f64) -> f64 {
     let (cx, cy) = (v.center.x * w, v.center.y * h);
@@ -316,7 +395,20 @@ pub fn reorient_lens(lens: &EmbeddedLens, o: Orientation, w: f64, h: f64) -> Emb
         EmbeddedWarp { planes, center: map_pt(wp.center), radius: wp.radius * long_ratio }
     });
     let vignette = lens.vignette.map(|v| EmbeddedVignette { k: v.k, center: map_pt(v.center), radius: v.radius * long_ratio });
-    EmbeddedLens { warp, vignette }
+    let stages = lens.stages.map(|st| {
+        st.map(|st| {
+            let c = Point::new(st.center.x * w, st.center.y * h);
+            let c2 = o.map(c.x, c.y, w, h);
+            let planes = st.planes.map(|mut k| {
+                // same rotation of the tangential vector as for `WarpRectilinear`
+                let e = o.map(c.x + k[16], c.y + k[15], w, h);
+                (k[15], k[16]) = (e.1 - c2.1, e.0 - c2.0);
+                k
+            });
+            EmbeddedWarpStage { planes, center: map_pt(st.center), radius: st.radius * long_ratio, reciprocal: st.reciprocal }
+        })
+    });
+    EmbeddedLens { warp, vignette, stages, source: lens.source }
 }
 
 // ------------------------------------------------------------------------------------------ lateral CA
@@ -348,8 +440,9 @@ pub(crate) fn fingerprint(img: &Rgb32f) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ ((img.width as u64) << 32 | img.height as u64);
     let n = img.data.len();
     for i in 0..512usize {
-        let p = img.data[(i.wrapping_mul(2_654_435_761) ^ i) % n.max(1)];
-        for c in p {
+        // (an empty image has no pixels to sample: its dimensions are the fingerprint)
+        let Some(p) = img.data.get((i.wrapping_mul(2_654_435_761) ^ i) % n.max(1)) else { break };
+        for c in *p {
             h ^= c.to_bits() as u64;
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
@@ -510,31 +603,60 @@ fn hue_weight(h: f32, lo: f32, hi: f32) -> f32 {
 /// Long edge (px) at which defringe widths are specified: fringes are 1–7 px wide on a ~4000 px image.
 pub const DEFRINGE_REF_LONG: f64 = 4000.0;
 
-/// Defringe: desaturate purple / green colour fringes that sit next to high-contrast edges. `scale` is output
-/// pixels per reference pixel (output long edge / [`DEFRINGE_REF_LONG`]) so the fringe width is the same
-/// fraction of the image at any size.
-pub fn defringe(img: &mut Rgb32f, s: &DevelopSettings, scale: f64) {
+/// Defringe's resolved parameters (the CPU stage below and the GPU kernels both read these).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DefringeParams {
+    /// Radius (output px) of the lightness min / max filters that find edges.
+    pub radius: usize,
+    /// Purple and green OkLab hue ranges (degrees, lo ≤ hi) and strengths (0..1).
+    pub purple: (f32, f32),
+    pub green: (f32, f32),
+    pub purple_strength: f32,
+    pub green_strength: f32,
+}
+
+/// Defringe's parameters for `s` at `scale` output pixels per reference pixel, or `None` when it
+/// does nothing.
+pub fn defringe_params(s: &DevelopSettings, scale: f64) -> Option<DefringeParams> {
     let o = &s.optics;
     if !s.section_enabled("optics") || (o.defringe_purple_amount <= 0.0 && o.defringe_green_amount <= 0.0) {
-        return;
+        return None;
     }
-    let (w, h) = (img.width, img.height);
-    let max_amt = o.defringe_purple_amount.max(o.defringe_green_amount);
+    // as far as the sliders go (0–20): an amount from a damaged catalog or sidecar made the
+    // radius overflow
+    let max_amt = o.defringe_purple_amount.max(o.defringe_green_amount).min(20.0);
     // fringe width in source px grows with the amount (1..7 px), in output px at least one
-    let radius = ((1.0 + max_amt * 0.3) * scale).round().max(1.0) as usize;
-    // perceptual lightness and its local range (dilated contrast)
-    let lab: Vec<[f32; 3]> = img.data.iter().map(|p| oklab_from_2020([p[0].max(0.0), p[1].max(0.0), p[2].max(0.0)])).collect();
-    let l = Plane { width: w, height: h, data: lab.iter().map(|p| p[0]).collect() };
-    let (lo, hi) = (min_filter(&l, radius, false), min_filter(&l, radius, true));
+    let radius = ((1.0 + max_amt * 0.3) * scale).round().max(1.0);
+    // (an absurd scale must not ask for a filter wider than any image; the stages clamp it to theirs)
+    let radius = if radius.is_finite() { radius.min(1e6) as usize } else { 1 };
     let range = |lo: f64, hi: f64, span: (f32, f32)| {
         let a = span.0 + (span.1 - span.0) * (lo / 100.0) as f32;
         let b = span.0 + (span.1 - span.0) * (hi / 100.0) as f32;
         (a.min(b), a.max(b))
     };
-    let pr = range(o.defringe_purple_hue_lo, o.defringe_purple_hue_hi, PURPLE_HUES);
-    let gr = range(o.defringe_green_hue_lo, o.defringe_green_hue_hi, GREEN_HUES);
-    let ps = (o.defringe_purple_amount / 8.0).min(1.0) as f32;
-    let gs = (o.defringe_green_amount / 8.0).min(1.0) as f32;
+    Some(DefringeParams {
+        radius,
+        purple: range(o.defringe_purple_hue_lo, o.defringe_purple_hue_hi, PURPLE_HUES),
+        green: range(o.defringe_green_hue_lo, o.defringe_green_hue_hi, GREEN_HUES),
+        purple_strength: (o.defringe_purple_amount / 8.0).min(1.0) as f32,
+        green_strength: (o.defringe_green_amount / 8.0).min(1.0) as f32,
+    })
+}
+
+/// Defringe: desaturate purple / green colour fringes that sit next to high-contrast edges. `scale` is output
+/// pixels per reference pixel (output long edge / [`DEFRINGE_REF_LONG`]) so the fringe width is the same
+/// fraction of the image at any size.
+pub fn defringe(img: &mut Rgb32f, s: &DevelopSettings, scale: f64) {
+    let Some(DefringeParams { radius, purple: pr, green: gr, purple_strength: ps, green_strength: gs }) = defringe_params(s, scale) else {
+        return;
+    };
+    let (w, h) = (img.width, img.height);
+    // never wider than the picture
+    let radius = radius.clamp(1, w.max(h).max(1));
+    // perceptual lightness and its local range (dilated contrast)
+    let lab: Vec<[f32; 3]> = img.data.iter().map(|p| oklab_from_2020([p[0].max(0.0), p[1].max(0.0), p[2].max(0.0)])).collect();
+    let l = Plane { width: w, height: h, data: lab.iter().map(|p| p[0]).collect() };
+    let (lo, hi) = (min_filter(&l, radius, false), min_filter(&l, radius, true));
     for_rows(&mut img.data, w, |y, row| {
         for (x, px) in row.iter_mut().enumerate() {
             let i = y * w + x;
@@ -559,345 +681,55 @@ pub fn defringe(img: &mut Rgb32f, s: &DevelopSettings, scale: f64) {
     });
 }
 
-/// Separable square min (or max) filter of radius `r`.
+/// Separable square min (or max) filter of radius `r`, linear in the pixels whatever `r` is (a
+/// crop can make the radius as wide as the output, and a scan of every neighbourhood was then
+/// cubic in the side).
 fn min_filter(p: &Plane, r: usize, max: bool) -> Plane {
     let (w, h) = (p.width, p.height);
-    let pick = |a: f32, b: f32| if max { a.max(b) } else { a.min(b) };
     let mut tmp = Plane::new(w, h);
-    for_rows(&mut tmp.data, w, |y, row| {
-        let src = &p.data[y * w..(y + 1) * w];
-        for (x, v) in row.iter_mut().enumerate() {
-            let (a, b) = (x.saturating_sub(r), (x + r).min(w - 1));
-            *v = src[a..=b].iter().copied().fold(src[x], pick);
-        }
-    });
+    for_rows(&mut tmp.data, w, |y, row| extreme_1d(&p.data[y * w..(y + 1) * w], r, max, row));
+    // the vertical pass runs along the rows of the transposed plane
+    let mut t = vec![0f32; w * h];
+    for (i, v) in tmp.data.iter().enumerate() {
+        t[(i % w) * h + i / w] = *v;
+    }
+    // each buffer goes once the next is built, so no more than three planes are alive at once
+    drop(tmp);
+    let mut tt = vec![0f32; w * h];
+    for_rows(&mut tt, h, |x, col| extreme_1d(&t[x * h..(x + 1) * h], r, max, col));
+    drop(t);
     let mut out = Plane::new(w, h);
-    for_rows(&mut out.data, w, |y, row| {
-        let (a, b) = (y.saturating_sub(r), (y + r).min(h - 1));
-        for (x, v) in row.iter_mut().enumerate() {
-            let mut m = tmp.data[y * w + x];
-            for yy in a..=b {
-                m = pick(m, tmp.data[yy * w + x]);
-            }
-            *v = m;
-        }
-    });
+    for (i, v) in tt.iter().enumerate() {
+        out.data[(i % h) * w + i / h] = *v;
+    }
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// splitmix64: deterministic pseudo-random numbers for the warp tests.
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-        /// Uniform in `lo..hi`.
-        fn range(&mut self, lo: f64, hi: f64) -> f64 {
-            lo + (hi - lo) * ((self.next() >> 11) as f64 / (1u64 << 53) as f64)
-        }
-        /// `range(lo, hi)` or, one time in four, exactly 0 (to take the "no correction" branches).
-        fn maybe(&mut self, lo: f64, hi: f64) -> f64 {
-            if self.next().is_multiple_of(4) { 0.0 } else { self.range(lo, hi) }
-        }
+/// `out[x]` = the min (or max) of `src[x - r ..= x + r]` clipped to the slice, by the van Herk /
+/// Gil–Werman blocks: three passes over the line however wide the window.
+fn extreme_1d(src: &[f32], r: usize, max: bool, out: &mut [f32]) {
+    let n = src.len();
+    if n == 0 {
+        return;
     }
-
-    /// A pseudo-random warp: perspective, manual distortion, CA and an embedded lens warp, each sometimes off.
-    /// Sizes are Pythagorean (exact `hypot`), so results don't depend on the platform's libm.
-    fn random_warp(r: &mut Rng) -> Warp {
-        const SIZES: [(f64, f64); 6] = [(4000.0, 3000.0), (3000.0, 4000.0), (1200.0, 900.0), (1200.0, 500.0), (56.0, 33.0), (6000.0, 4500.0)];
-        let (w, h) = SIZES[(r.next() % SIZES.len() as u64) as usize];
-        let mut wp = Warp::identity(w, h);
-        if !r.next().is_multiple_of(4) {
-            let m = [
-                1.0 + r.range(-0.2, 0.2),
-                r.range(-0.2, 0.2),
-                r.range(-0.1, 0.1),
-                r.range(-0.2, 0.2),
-                1.0 + r.range(-0.2, 0.2),
-                r.range(-0.1, 0.1),
-                r.range(-0.4, 0.4),
-                r.range(-0.4, 0.4),
-                1.0 + r.range(-0.1, 0.1),
-            ];
-            wp.persp_inv = Homography(m);
-            wp.persp = wp.persp_inv.inverse().unwrap_or(Homography::IDENTITY);
-        }
-        wp.k1 = r.maybe(-0.2, 0.2);
-        wp.ca = [r.maybe(-0.003, 0.003), r.maybe(-0.003, 0.003), r.maybe(-0.003, 0.003)];
-        if !r.next().is_multiple_of(4) {
-            let mut plane = || {
-                [
-                    1.0 + r.range(-0.05, 0.05),
-                    r.range(-0.08, 0.08),
-                    r.range(-0.05, 0.05),
-                    r.range(-0.02, 0.02),
-                    r.range(-0.003, 0.003),
-                    r.range(-0.003, 0.003),
-                ]
-            };
-            let planes = [plane(), plane(), plane()];
-            let warp = EmbeddedWarp { planes, center: Point::new(r.range(0.4, 0.6), r.range(0.4, 0.6)), radius: r.range(0.5, 0.8) };
-            wp.lens = Some(EmbeddedLens { warp: Some(warp), vignette: None });
-            wp.lens_dist = r.maybe(0.0, 2.0);
-        }
-        wp
+    // past the line's length a wider window takes in nothing more
+    let r = r.min(n);
+    let id = if max { f32::NEG_INFINITY } else { f32::INFINITY };
+    let pick = |a: f32, b: f32| if max { a.max(b) } else { a.min(b) };
+    let (k, m) = (2 * r + 1, n + 2 * r);
+    let pad = |i: usize| if i < r || i >= r + n { id } else { src[i - r] };
+    let mut g = vec![id; m];
+    let mut hh = vec![id; m];
+    for i in 0..m {
+        g[i] = if i % k == 0 { pad(i) } else { pick(g[i - 1], pad(i)) };
     }
-
-    /// FNV-1a over the bits of the f64 warp results (`Affine::apply`, `Homography::apply`, `to_corrected`,
-    /// `from_corrected`, `corrected_to_source`, `to_source`, `embedded_warp`) for pseudo-random warps and points.
-    /// The expected value was captured before these formulas became generic over `Real`: the f64 path must keep
-    /// the same operations in the same order, bit for bit. To recompute it after changing the inputs, run this
-    /// test (printing `hash`) on a scratch copy of 419261c (thumb-split, pre-generic formulas) and paste it here.
-    #[test]
-    fn warp_f64_results_are_bit_identical_to_the_pre_generic_formulas() {
-        let mut hash = 0xCBF2_9CE4_8422_2325u64;
-        let mut eat = |p: Point| {
-            for v in [p.x, p.y] {
-                for b in v.to_bits().to_le_bytes() {
-                    hash = (hash ^ b as u64).wrapping_mul(0x0000_0100_0000_01B3);
-                }
-            }
-        };
-        let mut r = Rng(42);
-        for _ in 0..2000 {
-            let wp = random_warp(&mut r);
-            let a = lightcraft_geom::Affine([
-                r.range(-2.0, 2.0),
-                r.range(-2.0, 2.0),
-                r.range(-2.0, 2.0),
-                r.range(-2.0, 2.0),
-                r.range(-500.0, 500.0),
-                r.range(-500.0, 500.0),
-            ]);
-            for _ in 0..40 {
-                let p = Point::new(r.range(-0.2, 1.2) * wp.w, r.range(-0.2, 1.2) * wp.h);
-                eat(a.apply(p));
-                eat(wp.persp_inv.apply(Point::new(p.x / wp.w - 0.5, p.y / wp.h - 0.5)));
-                eat(wp.to_corrected(p));
-                eat(wp.from_corrected(p));
-                for ch in 0..3 {
-                    eat(wp.corrected_to_source(p, ch));
-                    eat(wp.to_source(p, ch));
-                }
-                if let Some(ew) = wp.lens.and_then(|l| l.warp) {
-                    for ch in 0..4 {
-                        eat(embedded_warp(&ew, p, ch, wp.w, wp.h));
-                    }
-                }
-            }
-        }
-        // `Homography::apply`'s near-zero denominator clamp, including subnormal and signed-zero denominators and
-        // ±1e-300 exactly (not clamped: `<`, not `<=`)
-        let hz = Homography([1.0, 0.5, 0.25, -0.5, 1.0, 0.125, 1.0, 0.0, 0.0]);
-        for x in [0.0, -0.0, 1e-310, -1e-310, 1e-300, -1e-300, 1e-299, -1e-299, 0.5] {
-            eat(hz.apply(Point::new(x, 0.75)));
-        }
-        assert_eq!(hash, 0x3FA5_7473_D795_9E32, "f64 warp results changed");
+    for i in (0..m).rev() {
+        hh[i] = if i % k == k - 1 || i == m - 1 { pad(i) } else { pick(hh[i + 1], pad(i)) };
     }
-
-    /// The interval evaluation of `framing` bounds the f64 evaluation of every point of the box.
-    #[test]
-    fn interval_framing_encloses_every_f64_result() {
-        let mut r = Rng(7);
-        let (mut decided, mut total) = (0, 0);
-        for _ in 0..500 {
-            let wp = random_warp(&mut r);
-            let a = lightcraft_geom::Affine([
-                r.range(0.5, 2.0),
-                r.range(-0.2, 0.2),
-                r.range(-0.2, 0.2),
-                r.range(0.5, 2.0),
-                r.range(-300.0, 300.0),
-                r.range(-300.0, 300.0),
-            ]);
-            for _ in 0..20 {
-                let (x0, y0) = (r.range(-0.2, 1.1) * wp.w, r.range(-0.2, 1.1) * wp.h);
-                let (bw, bh) = (r.range(0.0, 40.0), r.range(0.0, 40.0));
-                let (ix, iy) = (Interval::new(x0, x0 + bw), Interval::new(y0, y0 + bh));
-                let (_, (sx, sy)) = wp.framing(&a, ix, iy);
-                total += 1;
-                if !(sx.is_decided() && sy.is_decided()) {
-                    continue;
-                }
-                decided += 1;
-                for i in 0..=6 {
-                    for j in 0..=6 {
-                        let (x, y) = if i == 6 && j == 6 {
-                            (r.range(x0, x0 + bw), r.range(y0, y0 + bh))
-                        } else {
-                            (x0 + bw * i as f64 / 5.0, y0 + bh * j as f64 / 5.0)
-                        };
-                        let (x, y) = (x.clamp(ix.lo(), ix.hi()), y.clamp(iy.lo(), iy.hi()));
-                        let (_, (fx, fy)) = wp.framing(&a, x, y);
-                        assert!(
-                            sx.lo() <= fx && fx <= sx.hi() && sy.lo() <= fy && fy <= sy.hi(),
-                            "({x}, {y}) → ({fx}, {fy}) outside {sx:?} × {sy:?}"
-                        );
-                    }
-                }
-            }
-        }
-        assert!(decided * 10 > total * 9, "{decided}/{total} boxes bounded");
-    }
-
-    #[test]
-    fn block_coverage_agrees_with_every_pixel() {
-        let lens = EmbeddedLens {
-            warp: Some(EmbeddedWarp {
-                planes: [[1.0, -0.03, 0.01, 0.0, 0.001, -0.002], [1.0, -0.028, 0.01, 0.0, 0.001, -0.002], [1.0, -0.026, 0.01, 0.0, 0.001, -0.002]],
-                center: Point::new(0.52, 0.48),
-                radius: 0.6,
-            }),
-            vignette: None,
-        };
-        let mut cases: Vec<DevelopSettings> = Vec::new();
-        let mut s = DevelopSettings::default();
-        s.optics.lens_profile = true;
-        s.optics.ca_red = 30.0;
-        s.geometry.horizontal = -15.0;
-        cases.push(s.clone());
-        s.orientation = Orientation::Rotate270;
-        cases.push(s.clone());
-        let mut s = DevelopSettings::default();
-        s.optics.distortion = -60.0;
-        s.optics.ca_blue = 50.0;
-        s.geometry.vertical = 25.0;
-        s.geometry.rotate = 7.0;
-        cases.push(s.clone());
-        s.optics.distortion = 80.0;
-        s.geometry.horizontal = 30.0;
-        s.orientation = Orientation::Rotate90;
-        cases.push(s);
-        for (i, s) in cases.iter().enumerate() {
-            let f = crate::geometry::Frame::with_lens(900, 600, s, true, Some(&lens));
-            let wp = f.warp.as_ref().expect("warp");
-            let (w, h) = f.fit(700, 700);
-            let o2t = f.out_to_oriented(w, h);
-            let (mut decided, mut tiles, mut blank) = (0, 0, 0);
-            for (tw, th) in [(32, 8), (7, 5), (64, 64)] {
-                for y0 in (0..h).step_by(th) {
-                    for x0 in (0..w).step_by(tw) {
-                        let (x1, y1) = ((x0 + tw).min(w), (y0 + th).min(h));
-                        tiles += 1;
-                        let Some(all) = wp.block_coverage(&o2t, x0, x1, y0, y1) else { continue };
-                        decided += 1;
-                        for y in y0..y1 {
-                            for x in x0..x1 {
-                                assert_eq!(wp.covers(&o2t, x, y), all, "case {i}: pixel {x},{y} in block {x0}..{x1} × {y0}..{y1}");
-                                blank += !all as usize;
-                            }
-                        }
-                    }
-                }
-            }
-            // most blocks are decided wholesale, including blank ones away from the edge
-            assert!(decided * 10 > tiles * 8, "case {i}: {decided}/{tiles} blocks decided");
-            // strong distortion leaves blank margins wide enough for whole blocks
-            assert!(blank > 0 || i < 2, "case {i}: no blank block decided");
-            assert_eq!(wp.block_coverage(&o2t, 5, 5, 0, 1), None, "empty block");
-        }
-    }
-
-    /// A grid of dark lines on white with lateral CA: red magnified by `ar`, blue by `ab` (about the centre).
-    fn ca_grid(w: usize, h: usize, ar: f64, ab: f64) -> Rgb32f {
-        let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
-        let val = |x: f64, y: f64| -> f32 {
-            // smooth-edged discs on a grid (edges in every direction)
-            let cell = w as f64 / 10.0;
-            let (fx, fy) = ((x / cell).fract() - 0.5, (y / cell).fract() - 0.5);
-            let d = fx.hypot(fy) * cell - cell * 0.28;
-            (0.05 + 0.85 * (d / 1.2).clamp(-0.5, 0.5) + 0.425) as f32
-        };
-        Rgb32f::from_fn(w, h, |x, y| {
-            let (x, y) = (x as f64 + 0.5, y as f64 + 0.5);
-            let at = |a: f64| val(cx + (x - cx) / (1.0 + a), cy + (y - cy) / (1.0 + a));
-            [at(ar), at(0.0), at(ab)]
-        })
-    }
-
-    #[test]
-    fn ca_estimate_recovers_scale() {
-        let img = ca_grid(600, 400, 0.004, -0.003);
-        let [r, b] = estimate_lateral_ca_uncached(&img);
-        assert!((r - 0.004).abs() < 0.0008, "red {r}");
-        assert!((b + 0.003).abs() < 0.0008, "blue {b}");
-        let clean = ca_grid(600, 400, 0.0, 0.0);
-        let [r, b] = estimate_lateral_ca_uncached(&clean);
-        assert!(r.abs() < 0.0005 && b.abs() < 0.0005, "{r} {b}");
-    }
-
-    #[test]
-    fn warp_identity_and_distortion_direction() {
-        let s = DevelopSettings::default();
-        let wp = Warp::from_settings(300.0, 200.0, &s, None);
-        assert!(wp.is_identity());
-        let mut s = s;
-        s.optics.distortion = 50.0; // corrects barrel: corners sample from further in
-        let wp = Warp::from_settings(300.0, 200.0, &s, None);
-        let q = wp.to_source(Point::new(0.0, 0.0), 1);
-        assert!(q.x > 0.0 && q.y > 0.0);
-        let c = wp.to_source(Point::new(150.0, 100.0), 1);
-        assert!(c.dist(Point::new(150.0, 100.0)) < 1e-9);
-    }
-
-    #[test]
-    fn manual_vignette_brightens_corners() {
-        let mut s = DevelopSettings::default();
-        s.optics.vignetting = 100.0;
-        let wp = Warp::from_settings(300.0, 200.0, &s, None);
-        assert!((wp.gain(Point::new(150.0, 100.0)) - 1.0).abs() < 1e-6);
-        assert!(wp.gain(Point::new(0.0, 0.0)) > 2.0);
-    }
-
-    #[test]
-    fn reorient_keeps_centre_mapping() {
-        let lens = EmbeddedLens {
-            warp: Some(EmbeddedWarp { planes: [[1.0, 0.01, 0.0, 0.0, 0.001, 0.002]; 3], center: Point::new(0.4, 0.5), radius: 0.6 }),
-            vignette: Some(EmbeddedVignette { k: [0.2, 0.0, 0.0, 0.0, 0.0], center: Point::new(0.4, 0.5), radius: 0.6 }),
-        };
-        let r = reorient_lens(&lens, Orientation::Rotate90, 300.0, 200.0);
-        // rotate 90° cw: (x, y) → (h − y, x)
-        let c = r.warp.unwrap().center;
-        assert!((c.x - 0.5).abs() < 1e-9 && (c.y - 0.4).abs() < 1e-9, "{c:?}");
-        // a point's warped position transforms like the point itself
-        let p = Point::new(50.0, 30.0);
-        let s0 = embedded_warp(&lens.warp.unwrap(), p, 0, 300.0, 200.0);
-        let m = |q: Point| {
-            let (x, y) = Orientation::Rotate90.map(q.x, q.y, 300.0, 200.0);
-            Point::new(x, y)
-        };
-        let s1 = embedded_warp(&r.warp.unwrap(), m(p), 0, 200.0, 300.0);
-        assert!(s1.dist(m(s0)) < 1e-6, "{s1:?} vs {:?}", m(s0));
-    }
-
-    #[test]
-    fn defringe_removes_purple_at_edges_only() {
-        let mut s = DevelopSettings::default();
-        s.optics.defringe_purple_amount = 10.0;
-        // white | black edge with a purple column next to it, and a purple patch far from edges
-        let purple = [0.25f32, 0.05, 0.45];
-        let mut img = Rgb32f::from_fn(40, 20, |x, _| if x < 20 { [0.9; 3] } else { [0.02; 3] });
-        for y in 0..20 {
-            img.set(20, y, purple);
-        }
-        let flat = Rgb32f::filled(40, 20, purple);
-        let mut flat2 = flat.clone();
-        defringe(&mut img, &s, 1.0);
-        defringe(&mut flat2, &s, 1.0);
-        let chroma = |p: [f32; 3]| {
-            let l = oklab_from_2020(p);
-            l[1].hypot(l[2])
-        };
-        assert!(chroma(img.get(20, 10)) < chroma(purple) * 0.3);
-        assert!((chroma(flat2.get(20, 10)) - chroma(purple)).abs() < 1e-4);
+    for (x, o) in out.iter_mut().enumerate().take(n) {
+        *o = pick(hh[x], g[x + k - 1]);
     }
 }
+
+#[cfg(test)]
+mod tests;

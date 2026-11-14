@@ -13,8 +13,8 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::backend::Backend;
 use crate::backup::{
-    ACTIVE_LIBRARY, README, ZipWriter, data_offset, find_central, original_entry, parse_central, restore_key, restored_dir_name, tail_len,
-    valid_hash, verify,
+    ACTIVE_LIBRARY, README, ZipWriter, data_offset, find_central, original_entry, parse_central, restore_plan, restored_dir_name, tail_len,
+    valid_hash, verify, verify_original,
 };
 use crate::files::{Files, LIBRARY_FILES};
 use crate::store::storage_key;
@@ -93,25 +93,41 @@ pub fn install_panic_hook() {
 const TAB_LOCK: &str = "lightcraft-library";
 
 /// Hold the library lock for as long as this page lives (Web Locks API). `Some(true)`: ours;
-/// `Some(false)`: another tab of this site has it; `None`: the browser can't tell (no Web Locks).
+/// `Some(false)`: another tab of this site has it; `None`: the browser can't tell (no Web Locks, or
+/// it refused the request).
 pub async fn acquire_tab_lock() -> Option<bool> {
     let nav = Reflect::get(&js_sys::global(), &"navigator".into()).ok()?;
     let locks = Reflect::get(&nav, &"locks".into()).ok().filter(|l| !l.is_undefined() && !l.is_null())?;
     let request: js_sys::Function = Reflect::get(&locks, &"request".into()).ok()?.dyn_into().ok()?;
     let opts = js_sys::Object::new();
     Reflect::set(&opts, &"ifAvailable".into(), &true.into()).ok()?;
-    let granted = js_sys::Promise::new(&mut |resolve, _reject| {
+    let granted = js_sys::Promise::new(&mut |resolve, reject| {
         let cb = Closure::once_into_js(move |lock: JsValue| -> JsValue {
             let ours = !lock.is_null() && !lock.is_undefined();
             let _ = resolve.call1(&JsValue::NULL, &ours.into());
             // keep the lock until the page goes away: a promise that never settles
             if ours { js_sys::Promise::new(&mut |_, _| {}).into() } else { JsValue::NULL }
         });
-        if let Err(e) = request.call3(&locks, &TAB_LOCK.into(), &opts, &cb) {
-            log::warn!("Web Locks request failed: {e:?}");
+        // a refused request never calls `cb`: settle with its error instead of waiting forever
+        match request.call3(&locks, &TAB_LOCK.into(), &opts, &cb) {
+            Ok(pending) => {
+                let catch = Reflect::get(&pending, &"catch".into()).ok().and_then(|c| c.dyn_into::<js_sys::Function>().ok());
+                if let Some(catch) = catch {
+                    let _ = catch.call1(&pending, &reject);
+                }
+            }
+            Err(e) => {
+                let _ = reject.call1(&JsValue::NULL, &e);
+            }
         }
     });
-    JsFuture::from(granted).await.ok().map(|v| v.is_truthy())
+    match JsFuture::from(granted).await {
+        Ok(v) => Some(v.is_truthy()),
+        Err(e) => {
+            log::warn!("Web Locks request failed, starting without the one-tab guard: {e:?}");
+            None
+        }
+    }
 }
 
 /// Offer a blob as a download named `name`.
@@ -133,10 +149,14 @@ pub fn download_blob(name: &str, blob: &web_sys::Blob) -> Result<(), String> {
     Ok(())
 }
 
+/// Where a finished backup goes: the browser's downloads ([`download_blob`]), or the page framing
+/// LightCraft (`?host=parent`). Awaited, so the backup counts as done only once it is handed over.
+pub type Deliver = Box<dyn FnOnce(String, web_sys::Blob) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>>>>>;
+
 /// File ▸ Back Up Library…: a zip of the library files (as the app has them, saved or not) and
 /// every original in storage, built entry by entry into the browser's memory (outside the wasm
-/// heap) and downloaded. `names`: content hash → the photo's file name.
-pub async fn backup(files: Files, backend: Backend, names: HashMap<String, String>) -> Result<(usize, f64), String> {
+/// heap) and handed to `deliver`. `names`: content hash → the photo's file name.
+pub async fn backup(files: Files, backend: Backend, names: HashMap<String, String>, deliver: Deliver) -> Result<(usize, f64), String> {
     let parts = js_sys::Array::new();
     let mut zip = ZipWriter::default();
     let mut bytes = 0f64;
@@ -174,7 +194,7 @@ pub async fn backup(files: Files, backend: Backend, names: HashMap<String, Strin
     opts.set_type("application/zip");
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts).map_err(|e| format!("{e:?}"))?;
     let day: String = String::from(js_sys::Date::new_0().to_iso_string()).chars().take(10).collect();
-    download_blob(&format!("lightcraft-library-backup-{day}.zip"), &blob)?;
+    deliver(format!("lightcraft-library-backup-{day}.zip"), blob).await?;
     Ok((originals, bytes + tail.len() as f64))
 }
 
@@ -198,8 +218,7 @@ pub async fn restore(file: web_sys::File, backend: Backend) -> Result<String, St
     }
     let dir = restored_dir_name(js_sys::Date::now());
     let mut written = 0usize;
-    for e in &entries {
-        let Some(key) = restore_key(&e.name, &dir) else { continue };
+    for (key, e) in restore_plan(&entries, &dir, len)? {
         // originals are named by their content: one already stored is the same file
         if key.starts_with("originals/") && backend.exists(&key).await? {
             continue;
@@ -208,6 +227,9 @@ pub async fn restore(file: web_sys::File, backend: Backend) -> Result<String, St
         let start = data_offset(e, &local)?;
         let data = read_range(&file, start, start + e.size).await?;
         verify(e, &data)?;
+        if let Some(hash) = key.strip_prefix("originals/") {
+            verify_original(e, hash, &data)?;
+        }
         backend.write(&key, &data).await.map_err(|err| format!("storing {}: {err}", e.name))?;
         written += 1;
     }

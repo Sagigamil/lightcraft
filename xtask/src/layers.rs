@@ -3,6 +3,7 @@
 //! The rule engine works on a small, metadata-independent model so it can be
 //! unit-tested; `from_metadata` builds that model from `cargo metadata`.
 
+use super::{layers, metadata};
 use serde_json::Value;
 
 /// Where a workspace crate sits.
@@ -36,14 +37,22 @@ pub const TABLE: &[(&str, Class)] = &[
     ("geom", Class::Layer(0)),
     ("color", Class::Layer(0)),
     ("raster", Class::Layer(0)),
-    ("tiff", Class::Layer(0)),
     ("sysmem", Class::Layer(0)),
+    ("wincolor", Class::Layer(0)),
     ("fetch", Class::Layer(0)),
+    ("denoise-core", Class::Layer(1)),
+    ("denoise", Class::Layer(1)),
     ("raw", Class::Layer(1)),
     ("codecs", Class::Layer(1)),
     ("meta", Class::Layer(1)),
     ("develop", Class::Layer(1)),
+    ("film", Class::Layer(1)),
+    ("lensdb", Class::Layer(2)),
+    ("inpaint", Class::Layer(1)),
+    ("faces", Class::Layer(1)),
+    ("geocode", Class::Layer(1)),
     ("scenes", Class::Layer(1)),
+    ("slideshow", Class::Layer(1)),
     ("pipeline", Class::Layer(2)),
     ("gpu", Class::Layer(3)),
     ("catalog", Class::Layer(3)),
@@ -68,7 +77,7 @@ pub const TABLE: &[(&str, Class)] = &[
 /// L1: `raw` and `codecs` read metadata through `meta`; `develop` uses `meta` for XMP.
 pub const INTRA_LAYER_ORDER: &[&[&str]] = &[
     &["geom", "color", "raster"],
-    &["tiff", "raster"],
+    &["denoise-core", "denoise"],
     &["meta", "raw"],
     &["meta", "codecs"],
     &["meta", "develop"],
@@ -86,7 +95,7 @@ fn intra_layer_allowed(from: &str, to: &str) -> bool {
 
 /// External crates that constitute a UI toolkit / windowing dependency.
 /// Entries ending in `*` are prefixes.
-pub const UI_CRATES: &[&str] = &["egui", "eframe", "winit", "egui_kittest", "rfd", "bevy*"];
+pub const UI_CRATES: &[&str] = &["craft-ui", "egui", "eframe", "winit", "egui_kittest", "rfd", "bevy*"];
 
 /// First layer allowed to use UI crates.
 pub const UI_MIN_LAYER: u8 = 5;
@@ -184,11 +193,8 @@ pub fn check(crates: &[Crate]) -> Vec<Violation> {
                 match classify(&d.name) {
                     // Unregistered deps are reported on their own entry.
                     None => {}
-                    Some(Class::Testkit) => {
-                        if d.kind != DepKind::Dev {
-                            out.push(Violation::TestkitAsNormalDep { krate: c.name.clone() });
-                        }
-                    }
+                    Some(Class::Testkit) if d.kind != DepKind::Dev => out.push(Violation::TestkitAsNormalDep { krate: c.name.clone() }),
+                    Some(Class::Testkit) => {}
                     Some(dc) => {
                         let to = dc.layer().unwrap_or(u8::MAX);
                         if to >= layer && !(to == layer && intra_layer_allowed(&c.name, &d.name)) {
@@ -246,6 +252,40 @@ pub fn describe(class: Option<Class>) -> String {
     }
 }
 
+pub(crate) fn cmd_layers() -> Result<(), String> {
+    let crates = layers::from_metadata(&metadata()?)?;
+    println!("Dependency layering (plan/architecture.md §3)\n");
+    println!("{:<28} {:<14} workspace deps", "crate", "layer");
+    for c in &crates {
+        let ws: Vec<String> = c
+            .deps
+            .iter()
+            .filter(|d| d.workspace)
+            .map(|d| {
+                let k = match d.kind {
+                    layers::DepKind::Normal => "",
+                    layers::DepKind::Dev => " (dev)",
+                    layers::DepKind::Build => " (build)",
+                };
+                format!("{}{k}", layers::short_name(&d.name))
+            })
+            .collect();
+        println!("{:<28} {:<14} {}", c.name, layers::describe(layers::classify(&c.name)), ws.join(", "));
+    }
+    let violations = layers::check(&crates);
+    println!();
+    if violations.is_empty() {
+        println!("OK: {} crates, no layering violations.", crates.len());
+        Ok(())
+    } else {
+        println!("{} violation(s):", violations.len());
+        for v in &violations {
+            println!("  - {v}");
+        }
+        Err(format!("{} layering violation(s)", violations.len()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,7 +327,7 @@ mod tests {
 
     #[test]
     fn ui_crates_forbidden_below_l5() {
-        for dep in ["egui", "eframe", "winit", "rfd"] {
+        for dep in ["craft-ui", "egui", "eframe", "winit", "rfd"] {
             let v = check(&[c("lightcraft-engine", &[(dep, Normal, false)])]);
             assert!(matches!(v[..], [Violation::UiBelowL5 { .. }]), "{dep}");
         }

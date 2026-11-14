@@ -18,7 +18,9 @@ use serde::Serialize;
 /// - a quarter for the working memory of decodes in flight ([`work_gate`]);
 /// - an eighth for the GPU renderer's pool of recycled buffers (trimmed when the app is idle).
 ///
-/// The rest is headroom for what isn't cached (renders in progress, textures, the UI). Default:
+/// The rest is headroom for what isn't cached (renders in progress, textures, the UI). An export
+/// batch may, in addition, hold up to twice the budget in photos rendering side by side
+/// ([`export_gate`]): transient memory, given back when the batch ends. Default:
 /// a quarter of the machine's RAM, at most 1.5 GiB (`LIGHTCRAFT_MEMORY_MB` overrides it).
 pub fn default_budget() -> usize {
     if let Some(mb) = std::env::var("LIGHTCRAFT_MEMORY_MB").ok().and_then(|v| v.trim().parse::<usize>().ok()).filter(|m| *m >= 64) {
@@ -32,7 +34,7 @@ pub fn default_budget() -> usize {
 }
 
 /// Physical memory (bytes), when the platform tells us without native calls.
-fn total_ram() -> Option<usize> {
+pub(crate) fn total_ram() -> Option<usize> {
     #[cfg(target_os = "linux")]
     {
         let s = std::fs::read_to_string("/proc/meminfo").ok()?;
@@ -83,6 +85,9 @@ fn apply(b: usize) {
     if let Some(g) = GATE.get() {
         g.set_limit(b / 4);
     }
+    if let Some(g) = EXPORT_GATE.get() {
+        g.set_limit(export_share(b));
+    }
     lightcraft_gpu::set_pool_limit((b / 8) as u64);
 }
 
@@ -94,7 +99,10 @@ pub fn cache_share(budget: usize) -> usize {
 /// A weighted semaphore over bytes of working memory: [`WorkGate::acquire`] waits while other
 /// holders already use the limit (one holder may always proceed, whatever its size).
 pub struct WorkGate {
-    state: Mutex<(usize, usize)>,
+    /// Bytes held and the limit. Held is a `u128`: callers weigh work with saturating maths, so a
+    /// permit may hold `usize::MAX`, and the exact total of several such permits still fits, so
+    /// releasing one in any order leaves the others counted (issue #2576).
+    state: Mutex<(u128, usize)>,
     cv: Condvar,
 }
 
@@ -109,7 +117,7 @@ impl WorkGate {
         WorkGate { state: Mutex::new((0, limit)), cv: Condvar::new() }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, (usize, usize)> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, (u128, usize)> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -118,24 +126,27 @@ impl WorkGate {
         self.cv.notify_all();
     }
 
-    /// Bytes held now and the limit.
+    /// Bytes held now (at most `usize::MAX`) and the limit.
     pub fn usage(&self) -> (usize, usize) {
-        *self.lock()
+        let g = self.lock();
+        (usize::try_from(g.0).unwrap_or(usize::MAX), g.1)
     }
 
-    /// Hold `bytes`, waiting until they fit (or nothing else is held).
+    /// Hold `bytes`, waiting until they fit (or nothing else is held). Even `usize::MAX` bytes on
+    /// a gate whose limit is `usize::MAX` make the next holder wait.
     pub fn acquire(&self, bytes: usize) -> Permit<'_> {
         let mut g = self.lock();
-        while g.0 > 0 && g.0 + bytes > g.1 {
+        while g.0 > 0 && g.0.saturating_add(bytes as u128) > g.1 as u128 {
             g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
         }
-        g.0 += bytes;
+        g.0 = g.0.saturating_add(bytes as u128);
         Permit { gate: self, bytes }
     }
 
     /// Hold `bytes` without waiting (interactive work): counted, so background work waits for it.
     pub fn acquire_urgent(&self, bytes: usize) -> Permit<'_> {
-        self.lock().0 += bytes;
+        let mut g = self.lock();
+        g.0 = g.0.saturating_add(bytes as u128);
         Permit { gate: self, bytes }
     }
 }
@@ -143,7 +154,7 @@ impl WorkGate {
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         let mut g = self.gate.lock();
-        g.0 = g.0.saturating_sub(self.bytes);
+        g.0 = g.0.saturating_sub(self.bytes as u128);
         drop(g);
         self.gate.cv.notify_all();
     }
@@ -173,6 +184,19 @@ pub fn work_gate() -> &'static WorkGate {
 }
 
 static GATE: OnceLock<WorkGate> = OnceLock::new();
+
+/// The process-wide gate for the photos of an export batch rendering side by side
+/// ([`crate::export::run_batch`]; limit: twice the budget). Separate from [`work_gate`], which the
+/// decodes inside each export take: one gate held across the other's acquire could deadlock.
+pub fn export_gate() -> &'static WorkGate {
+    EXPORT_GATE.get_or_init(|| WorkGate::new(export_share(budget())))
+}
+
+fn export_share(budget: usize) -> usize {
+    budget.saturating_mul(2)
+}
+
+static EXPORT_GATE: OnceLock<WorkGate> = OnceLock::new();
 
 /// Entries and bytes held by one cache.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]

@@ -9,10 +9,12 @@ description = "LightCraft GPU develop pipeline: wgpu compute (WGSL) twin of the 
 workspace = true
 
 [dependencies]
+lightcraft-denoise = { workspace = true, optional = true }
 lightcraft-geom = { workspace = true }
 lightcraft-color = { workspace = true }
 lightcraft-raster = { workspace = true }
 lightcraft-develop = { workspace = true }
+lightcraft-faces = { workspace = true }
 lightcraft-pipeline = { workspace = true }
 log = { workspace = true }
 
@@ -23,5 +25,12 @@ wgpu = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
 
+[features]
+default = []
+denoise = ["dep:lightcraft-denoise", "lightcraft-denoise/runtime"]
+
 [dev-dependencies]
+# tests record why they skip (`cargo xtask ci` lists the skips)
+lightcraft-testkit = { workspace = true }
 lightcraft-scenes = { workspace = true }
+lightcraft-raw = { workspace = true }

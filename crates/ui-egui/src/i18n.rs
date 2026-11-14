@@ -3,8 +3,8 @@
 //! A language is one entry in [`language_table!`] below: its BCP-47 code, the endonym shown in the
 //! Language menus, the ISO 15924 script its text needs (which picks the CJK font fallback), and its
 //! message catalog (`locales/<code>.json`, embedded at build time). Adding a language is that entry
-//! plus its catalogs — every menu and settings surface is built from the table, so nothing else in
-//! the UI changes.
+//! plus its catalogs and the corresponding language command in `menus.rs`. Settings read the
+//! locale table, while menus and the control channel share the command mapping.
 
 use std::{cell::RefCell, collections::BTreeMap, sync::OnceLock};
 
@@ -51,10 +51,13 @@ macro_rules! language_table {
                 static CATALOGS: OnceLock<BTreeMap<Locale, BTreeMap<String, String>>> = OnceLock::new();
                 static EMPTY: OnceLock<BTreeMap<String, String>> = OnceLock::new();
                 // A malformed catalog logs and comes back empty: a broken translation degrades to
-                // English text, it never takes the app down.
+                // English text, it never takes the app down. An empty translation is a missing one.
                 let parse = |catalog: Option<&'static str>| match catalog {
-                    Some(json) => match serde_json::from_str(json) {
-                        Ok(messages) => messages,
+                    Some(json) => match serde_json::from_str::<BTreeMap<String, String>>(json) {
+                        Ok(mut messages) => {
+                            messages.retain(|_, text| !text.is_empty());
+                            messages
+                        }
                         Err(error) => {
                             log::error!("Invalid message catalog for {}: {error}", self.code());
                             BTreeMap::new()
@@ -124,6 +127,49 @@ language_table! {
     Es, "es", "Español", "Latn", include_str!("../locales/es.json");
     De, "de", "Deutsch", "Latn", include_str!("../locales/de.json");
     Ru, "ru", "Русский", "Cyrl", include_str!("../locales/ru.json");
+    Fr, "fr", "Français", "Latn", include_str!("../locales/fr.json");
+    Uk, "uk", "Українська", "Cyrl", include_str!("../locales/uk.json");
+    Pl, "pl", "Polski", "Latn", include_str!("../locales/pl.json");
+    Cs, "cs", "Čeština", "Latn", include_str!("../locales/cs.json");
+    It, "it", "Italiano", "Latn", include_str!("../locales/it.json");
+    Ka, "ka", "ქართული", "Geor", include_str!("../locales/ka.json");
+    Sv, "sv", "Svenska", "Latn", include_str!("../locales/sv.json");
+    Fi, "fi", "Suomi", "Latn", include_str!("../locales/fi.json");
+    Id, "id", "Bahasa Indonesia", "Latn", include_str!("../locales/id.json");
+    Vi, "vi", "Tiếng Việt", "Latn", include_str!("../locales/vi.json");
+}
+
+impl Locale {
+    /// Every language in the order the Settings row and Edit ▸ Language list them: English first
+    /// (the source language), then the rest by their own name with accents folded, so Čeština
+    /// sits under C. Names in other scripts follow the Latin ones in code point order: Cyrillic,
+    /// Georgian, then the CJK languages.
+    pub fn for_picker() -> Vec<Self> {
+        let mut rest: Vec<Self> = Self::ALL.iter().copied().filter(|l| *l != Self::En).collect();
+        rest.sort_by_cached_key(|l| name_sort_key(l.name()));
+        std::iter::once(Self::En).chain(rest).collect()
+    }
+}
+
+/// `name` lowercased with the Latin accents that occur in language names folded away, so a
+/// byte-wise sort reads alphabetically. Other scripts are left as they are.
+fn name_sort_key(name: &str) -> String {
+    name.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'à'..='å' | 'ā' | 'ă' | 'ą' => 'a',
+            'ç' | 'ć' | 'č' => 'c',
+            'è'..='ë' | 'ē' | 'ě' | 'ę' | 'ế' | 'ệ' => 'e',
+            'ì'..='ï' | 'ī' => 'i',
+            'ñ' | 'ń' | 'ň' => 'n',
+            'ò'..='ö' | 'ø' | 'ő' => 'o',
+            'ś' | 'š' => 's',
+            'ù'..='ü' | 'ū' | 'ů' | 'ű' => 'u',
+            'ý' | 'ÿ' => 'y',
+            'ź' | 'ż' | 'ž' => 'z',
+            c => c,
+        })
+        .collect()
 }
 
 // The settings file stores the BCP-47 code (`"zh-hans"`), never the Rust variant name, so a
@@ -143,11 +189,33 @@ impl<'de> Deserialize<'de> for Locale {
 
 thread_local! {
     static LOCALE: std::cell::Cell<Locale> = const { std::cell::Cell::new(Locale::En) };
+    /// The host's answer for the "Auto" language ([`set_default_language`]).
+    static DEFAULT_LANGUAGE: std::cell::Cell<Option<Locale>> = const { std::cell::Cell::new(None) };
 }
 
-/// The UI language from the environment (`LIGHTCRAFT_LANGUAGE=zh-hans`), for headless runs.
+/// Install the language the "Auto" setting resolves to when nothing is stored. The browser host
+/// calls this once at startup with the browser's own languages ([`locale_from_tags`]); the
+/// desktop host doesn't: there Auto keeps following the environment. Must run before the UI state
+/// is first constructed.
+pub fn set_default_language(language: Locale) {
+    DEFAULT_LANGUAGE.with(|slot| slot.set(Some(language)));
+}
+
+/// The first of `tags` (BCP-47, most preferred first, as `navigator.languages` lists them) that
+/// names a shipped language; None when none does.
+pub fn locale_from_tags(tags: &[String]) -> Option<Locale> {
+    tags.iter().find_map(|tag| Locale::parse_tag(tag))
+}
+
+/// The UI language "Auto" resolves to: the environment's (`LIGHTCRAFT_LANGUAGE=zh-hans`, for
+/// headless runs), or the host-installed default ([`set_default_language`], the browser's languages
+/// on the web), else English.
 pub fn default_language() -> Locale {
-    std::env::var("LIGHTCRAFT_LANGUAGE").ok().and_then(|value| Locale::parse_tag(&value)).unwrap_or(Locale::En)
+    std::env::var("LIGHTCRAFT_LANGUAGE")
+        .ok()
+        .and_then(|value| Locale::parse_tag(&value))
+        .or_else(|| DEFAULT_LANGUAGE.with(std::cell::Cell::get))
+        .unwrap_or(Locale::En)
 }
 
 pub fn set_language(language: Locale) {
@@ -162,6 +230,16 @@ pub fn language() -> Locale {
 /// Never call this on editable user text, filenames or command identifiers.
 pub fn tr(source: &str) -> &str {
     tr_in(language(), source)
+}
+
+/// [`tr`] for a message whose translation depends on where it appears: a catalog entry keyed
+/// `"<context>|<source>"` wins, else the plain message. A language adds the contextual entry only
+/// where its shared translation reads wrongly there (Japanese はい / いいえ as a rule's value).
+fn tr_ctx_in<'a>(language: Locale, context: &str, source: &'a str) -> &'a str {
+    match language.catalog().get(&format!("{context}|{source}")) {
+        Some(translation) => translation.as_str(),
+        None => tr_in(language, source),
+    }
 }
 
 /// Catalog values are `'static` (they live in the embedded file), so a translation can be handed
@@ -184,12 +262,58 @@ fn catalog_verbatim(language: Locale) -> BTreeMap<String, &'static str> {
     language.catalog().iter().map(|(key, value)| (key.clone(), value.as_str())).collect()
 }
 
+/// `"s"` for a count other than one: the plural ending of English messages. Computed before a [`tr_format!`] rather
+/// than inside it, since the macro repeats its arguments once per language.
+pub(crate) fn plural_s(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
 // `tr_format!` (one arm per message, one `format!` per language) is generated by `build.rs` from
 // `locales/*-formats.json`.
 include!(concat!(env!("OUT_DIR"), "/tr-formats.rs"));
 
-/// A stock preset's or profile's name in the UI language; an imported or user-edited name stays
-/// exactly as its owner wrote it.
+/// The web build's notice for a dropped file the browser could not read.
+pub fn dropped_file_unreadable(name: &str, error: &str) -> String {
+    tr_format!("Could not read {name}: {e}", name = name, e = error)
+}
+
+/// The web build's notice for dropped files the library refused.
+pub fn dropped_import_failed(error: &str) -> String {
+    tr_format!("Import failed: {e}", e = error)
+}
+
+/// The web build's notice for `n` dropped photos that joined the library.
+pub fn dropped_photos_added(n: usize) -> String {
+    tr_format!("Added {n} photo{}", if n == 1 { "" } else { "s" }, n = n)
+}
+
+/// The web build's notice for `n` dropped photos that came back from Recently Deleted.
+pub fn dropped_photos_restored(n: usize) -> String {
+    tr_format!("Restored {} photo{} from Recently Deleted", n, if n == 1 { "" } else { "s" })
+}
+
+/// The web build's notice for what a drop of photos came to, from the `library.import` report: every outcome that
+/// happened (added, restored from Recently Deleted, not readable), joined with " · " as the desktop import's notice
+/// joins its parts, or `None` when none did (duplicates only).
+pub fn dropped_photos_outcome(report: &serde_json::Value) -> Option<String> {
+    let count = |k: &str| report[k].as_array().map_or(0, Vec::len);
+    let parts: Vec<String> = [
+        (count("imported"), dropped_photos_added as fn(usize) -> String),
+        (count("restored"), dropped_photos_restored),
+        (count("failed"), dropped_photos_unreadable),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, say)| say(n))
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The web build's notice for `n` dropped photos that could not be read.
+pub fn dropped_photos_unreadable(n: usize) -> String {
+    tr_format!("{} photo{} not readable", n, if n == 1 { "" } else { "s" })
+}
+
 /// The title and text of the message box shown when the desktop app's window can't start
 /// (issue #260), in the UI language: the error and, when there is one, the log file to look in.
 pub fn startup_failed_message(error: &str, log_file: Option<&str>) -> (String, String) {
@@ -200,6 +324,35 @@ pub fn startup_failed_message(error: &str, log_file: Option<&str>) -> (String, S
     (tr("LightCraft could not start").to_string(), text)
 }
 
+/// The title and text of the message box shown when LightCraft stopped while its window was up
+/// (issue #1337: the window's renderer after the graphics driver reset the GPU), in the UI
+/// language: what happened and, when there is one, the log file to look in.
+pub fn stopped_message(error: &str, log_file: Option<&str>) -> (String, String) {
+    let text = match log_file {
+        Some(path) => tr_format!("LightCraft stopped unexpectedly: {e}\n\nThe log file has the details: {path}", e = error, path = path),
+        None => tr_format!("LightCraft stopped unexpectedly: {e}", e = error),
+    };
+    (tr("LightCraft stopped").to_string(), text)
+}
+
+/// Whether sentence case may upper-case `c`. Georgian has no case: upper-casing Mkhedruli would
+/// turn it into Mtavruli, a different (all-caps) script, so Georgian letters stay as written.
+pub fn capitalizes(c: char) -> bool {
+    !matches!(c, '\u{10A0}'..='\u{10FF}' | '\u{1C90}'..='\u{1CBF}' | '\u{2D00}'..='\u{2D2F}')
+}
+
+/// `text` with its first letter upper-cased ("its input" → "Its input"), unless [`capitalizes`]
+/// says that letter has no capital to take.
+pub fn upper_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if capitalizes(first) => first.to_uppercase().chain(chars).collect(),
+        _ => text.to_string(),
+    }
+}
+
+/// A stock preset's or profile's name in the UI language; an imported or user-edited name stays
+/// exactly as its owner wrote it.
 pub fn builtin_label(source: &str, builtin: bool) -> &str {
     if builtin { tr(source) } else { source }
 }
@@ -308,7 +461,7 @@ pub fn color_label(catalog: &lightcraft_catalog::Catalog, label: lightcraft_cata
 /// A legacy smart-album filter summary, using the same display labels as filter chips.
 pub fn filter_label(filter: &lightcraft_catalog::Filter, catalog: &lightcraft_catalog::Catalog) -> String {
     if language() == Locale::En {
-        filter.describe()
+        filter.describe_with(catalog)
     } else {
         lightcraft_engine::filter_chips(filter, catalog)
             .iter()
@@ -318,9 +471,62 @@ pub fn filter_label(filter: &lightcraft_catalog::Filter, catalog: &lightcraft_ca
     }
 }
 
+/// What people read for a smart-album rule's problem, under its row: the field's name and the
+/// issue, in the current language ("Title: needs something to look for").
+pub fn problem_text(problem: &lightcraft_catalog::rules::Problem) -> String {
+    problem_text_in(language(), problem)
+}
+
+/// [`problem_text`] with the rule's position first ("#2.1 Rating: …"), for lists away from the
+/// editor (the sidebar's tooltip).
+pub fn problem_line(problem: &lightcraft_catalog::rules::Problem) -> String {
+    problem_line_in(language(), problem)
+}
+
+fn problem_text_in(language: Locale, problem: &lightcraft_catalog::rules::Problem) -> String {
+    let issue = tr_in(language, problem.issue.text());
+    // Japanese and Chinese catalogs join a label and its text with a full-width colon
+    let colon = if matches!(language.script(), "Jpan" | "Hans" | "Hant") { "：" } else { ": " };
+    match problem.field.as_deref() {
+        Some(field) => format!("{}{colon}{issue}", tr_in(language, lightcraft_catalog::rules::field_label(field).unwrap_or(field))),
+        None => issue.to_string(),
+    }
+}
+
+fn problem_line_in(language: Locale, problem: &lightcraft_catalog::rules::Problem) -> String {
+    let at: Vec<String> = problem.path.iter().map(|i| i.saturating_add(1).to_string()).collect();
+    // a problem with the album filter around the rules has no rule to point at
+    if at.is_empty() {
+        return problem_text_in(language, problem);
+    }
+    format!("#{} {}", at.join("."), problem_text_in(language, problem))
+}
+
+/// What people read for smart-album choice `id` of `field` ("Gemeinfrei" for `publicDomain` in
+/// German); an id the field doesn't know, as written.
+pub fn choice_text<'a>(field: &str, id: &'a str) -> &'a str {
+    choice_text_in(language(), field, id)
+}
+
+fn choice_text_in<'a>(language: Locale, field: &str, id: &'a str) -> &'a str {
+    lightcraft_catalog::rules::choice_label(field, id).map_or(id, |label| tr_in(language, label))
+}
+
+/// What people read for a smart-album yes/no value ("Ja" / "Nein" in German).
+pub fn bool_text(b: bool) -> &'static str {
+    bool_text_in(language(), b)
+}
+
+/// The context of a smart-album yes/no value ([`tr_ctx_in`]).
+const BOOL_CONTEXT: &str = "smart album value";
+
+fn bool_text_in(language: Locale, b: bool) -> &'static str {
+    tr_ctx_in(language, BOOL_CONTEXT, lightcraft_catalog::rules::bool_label(b))
+}
+
 /// A rule summary for display, keeping free-text rule values verbatim.
-pub fn rules_label(rules: &lightcraft_catalog::RuleSet) -> String {
-    fn describe(rules: &lightcraft_catalog::RuleSet, depth: usize) -> String {
+pub fn rules_label(rules: &lightcraft_catalog::RuleSet, catalog: &lightcraft_catalog::Catalog) -> String {
+    fn describe(rules: &lightcraft_catalog::RuleSet, catalog: &lightcraft_catalog::Catalog, depth: usize) -> String {
         use lightcraft_catalog::{
             Match, Rule,
             rules::{FIELDS, Kind, ops_for},
@@ -332,14 +538,15 @@ pub fn rules_label(rules: &lightcraft_catalog::RuleSet) -> String {
             .rules
             .iter()
             .map(|rule| match rule {
-                Rule::Group { group } => format!("({})", describe(group, depth + 1)),
+                Rule::Group { group } => format!("({})", describe(group, catalog, depth + 1)),
                 Rule::Field { field, op, value } => {
                     let Some((_, label, kind)) = FIELDS.iter().find(|entry| entry.0 == field) else { return field.clone() };
                     let operator = ops_for(*kind).iter().find(|entry| entry.0 == op).map_or(op.as_str(), |entry| entry.1);
                     let text = match kind {
-                        Kind::Choice(_) | Kind::Bool => {
-                            tr(value.as_str().unwrap_or(if value.as_bool() == Some(true) { "true" } else { "false" })).to_string()
-                        }
+                        // the album's name, as people know it (a user's name is never translated)
+                        Kind::Album => lightcraft_catalog::rules::album_name(value, Some(catalog)),
+                        Kind::Choice(_) => value.as_str().map_or_else(|| value.to_string(), |id| choice_text(field, id).to_string()),
+                        Kind::Bool => lightcraft_catalog::rules::bool_value(value).map_or_else(|| value.to_string(), |b| bool_text(b).to_string()),
                         _ if matches!(op.as_str(), "inLast" | "notInLast") => format!(
                             "{} {}",
                             value.get("n").unwrap_or(&serde_json::Value::Null),
@@ -359,657 +566,33 @@ pub fn rules_label(rules: &lightcraft_catalog::RuleSet) -> String {
         if rules.mode == Match::None { format!("{} ({text})", tr("none of")) } else { text }
     }
     // Preserve the established source-language summary.
-    if language() == Locale::En { rules.describe() } else { describe(rules, 0) }
+    if language() == Locale::En { rules.describe_with(catalog) } else { describe(rules, catalog, 0) }
 }
 
 #[cfg(test)]
-mod tests {
+mod gaps;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod picker_order_tests {
     use super::*;
 
     #[test]
-    fn every_language_has_a_catalog_covering_the_source() {
-        assert!(crate::i18n::Locale::En.catalog().is_empty(), "the source language needs no catalog");
-        for language in Locale::ALL {
-            assert!(!language.name().is_empty(), "{language:?} has a name");
-            assert!(!language.script().is_empty(), "{language:?} has a script");
-            assert_eq!(Locale::parse(language.code()), Some(*language), "{language:?} parses its own code");
-            if *language == Locale::En {
-                continue;
-            }
-            let messages = language.catalog();
-            assert!(!messages.is_empty(), "{language:?}: {} has no messages", language.code());
-            for (key, value) in messages {
-                assert!(!value.is_empty(), "{language:?}: empty translation for {key:?}");
-            }
-        }
-    }
-
-    /// Where two catalogs translate the same text they agree on its placeholders. Catalogs may cover
-    /// different sets of messages (a message a language lacks shows in English): the gaps are
-    /// reported, not failed, so a translation can grow at its own pace.
-    #[test]
-    fn catalogs_agree_on_placeholders_and_report_gaps() {
-        let fields = |text: &str| {
-            let mut out: Vec<String> = Vec::new();
-            let mut rest = text;
-            while let Some(start) = rest.find('{') {
-                let Some(end) = rest[start..].find('}') else { break };
-                out.push(rest[start + 1..start + end].split(':').next().unwrap_or("").to_string());
-                rest = &rest[start + end + 1..];
-            }
-            out.sort();
-            out
-        };
-        let translated: Vec<Locale> = Locale::ALL.iter().copied().filter(|language| *language != Locale::En).collect();
-        let all: std::collections::BTreeSet<&String> = translated.iter().flat_map(|language| language.catalog().keys()).collect();
-        for language in &translated {
-            let catalog = language.catalog();
-            for (key, value) in catalog {
-                assert_eq!(fields(key), fields(value), "{language:?}: {key:?} -> {value:?}");
-            }
-            let missing: Vec<&&String> = all.iter().filter(|key| !catalog.contains_key(key.as_str())).collect();
-            if !missing.is_empty() {
-                eprintln!("{} lacks {} message(s) another language translates (shown in English): {missing:?}", language.code(), missing.len());
-            }
-        }
-    }
-
-    /// Locale tags are matched leniently, so a system locale reaches a shipped language.
-    /// The message box for a desktop start that failed (issue #260) names the error and the log
-    /// file, in the UI language.
-    #[test]
-    fn startup_failure_message_names_the_error_and_the_log() {
-        let (title, text) = startup_failed_message("no adapter", Some("/home/a/.config/lightcraft/logs/lightcraft.log"));
-        assert_eq!(title, "LightCraft could not start");
-        assert!(text.contains("no adapter") && text.ends_with("lightcraft.log"), "{text}");
-        assert!(!startup_failed_message("no adapter", None).1.contains("log file"));
+    fn picker_lists_english_first_then_names_alphabetically() {
+        let order = Locale::for_picker();
+        assert_eq!(order.first(), Some(&Locale::En));
+        assert_eq!(order.len(), Locale::ALL.len());
+        let keys: Vec<String> = order[1..].iter().map(|l| name_sort_key(l.name())).collect();
+        assert!(keys.windows(2).all(|w| w[0] <= w[1]), "{keys:?}");
+        assert_eq!(name_sort_key("Čeština"), "cestina");
     }
 
     #[test]
-    fn locale_tags_normalize() {
-        assert_eq!(Locale::parse_tag("en"), Some(Locale::En));
-        assert_eq!(Locale::parse_tag("en-US"), Some(Locale::En));
-        assert_eq!(Locale::parse_tag("zh-hans"), Some(Locale::ZhHans));
-        assert_eq!(Locale::parse_tag("zh"), Some(Locale::ZhHans));
-        assert_eq!(Locale::parse_tag("zh_CN"), Some(Locale::ZhHans));
-        assert_eq!(Locale::parse_tag("zh-hant"), Some(Locale::ZhHant));
-        assert_eq!(Locale::parse_tag("zh-Hant"), Some(Locale::ZhHant));
-        assert_eq!(Locale::parse_tag("zh-TW"), Some(Locale::ZhHant));
-        assert_eq!(Locale::parse_tag("zh_TW.UTF-8"), Some(Locale::ZhHant));
-        assert_eq!(Locale::parse_tag("zh-HK"), Some(Locale::ZhHant));
-        assert_eq!(Locale::parse_tag("zh-Hant-TW"), Some(Locale::ZhHant));
-        assert_eq!(Locale::parse_tag("zh-CN"), Some(Locale::ZhHans));
-        assert_eq!(Locale::parse_tag("ja_JP.UTF-8"), Some(Locale::Ja));
-        assert_eq!(Locale::parse_tag("pt-br"), Some(Locale::PtBr));
-        assert_eq!(Locale::parse_tag("pt-BR"), Some(Locale::PtBr));
-        assert_eq!(Locale::parse_tag("pt_BR.UTF-8"), Some(Locale::PtBr));
-        assert_eq!(Locale::parse_tag("pt"), Some(Locale::PtBr));
-        for tag in ["de", "de-DE", "de_AT.UTF-8", "de-CH"] {
-            assert_eq!(Locale::parse_tag(tag), Some(Locale::De), "{tag}");
-        }
-        for tag in ["ru", "ru-RU", "ru_RU.UTF-8", "ru-UA"] {
-            assert_eq!(Locale::parse_tag(tag), Some(Locale::Ru), "{tag}");
-        }
-        for tag in ["es", "es-ES", "es_MX.UTF-8", "es-419"] {
-            assert_eq!(Locale::parse_tag(tag), Some(Locale::Es), "{tag}");
-        }
-        assert_eq!(Locale::parse_tag("xx"), None);
-    }
-
-    #[test]
-    fn switching_language_translates_and_restores() {
-        set_language(Locale::ZhHans);
-        assert_eq!(tr("Exposure"), "曝光");
-        assert_eq!(tr("Settings"), "设置");
-        // Untranslated and data-like text passes through untouched.
-        assert_eq!(tr("my-photo.jpg"), "my-photo.jpg");
-        assert_eq!(tr("develop.set"), "develop.set");
-        assert_eq!(tr("A string no catalog has"), "A string no catalog has");
-        set_language(Locale::Ja);
-        assert_eq!(tr("Exposure"), "露出");
-        set_language(Locale::PtBr);
-        assert_eq!(tr("Exposure"), "Exposição");
-        assert_eq!(tr("Settings"), "Configurações");
-        set_language(Locale::En);
-        assert_eq!(tr("Exposure"), "Exposure");
-    }
-
-    /// Format strings carry their values in every language, and a language without a translation
-    /// falls back to the English format rather than dropping the values.
-    #[test]
-    fn formats_render_in_every_language() {
-        // Every language's format string is checked by `format!` against the call site's values.
-        set_language(Locale::En);
-        assert_eq!(tr_format!("Imported {} photo{}", 12, "s"), "Imported 12 photos");
-        assert_eq!(tr_format!("Exported {ok} of {total} photo{}", "s", ok = 4, total = 12), "Exported 4 of 12 photos");
-        set_language(Locale::ZhHans);
-        assert_eq!(tr_format!("Imported {} photo{}", 12, "s"), "已导入 12 张照片");
-        assert_eq!(tr_format!("Exported {ok} of {total} photo{}", "s", ok = 4, total = 12), "已导出 12 张中的 4 张照片");
-        set_language(Locale::Ja);
-        assert_eq!(tr_format!("Imported {} photo{}", 12, "s"), "12枚を読み込みました");
-        assert_eq!(tr_format!("Exported {ok} of {total} photo{}", "s", ok = 4, total = 12), "12枚中4枚を書き出しました");
-        // Format specs survive translation: precision, sign, and values a language reorders.
-        for language in Locale::ALL {
-            set_language(*language);
-            let text = tr_format!("{count} smart preview{} · {:.1} MB", "s", 12.345, count = 3);
-            assert!(text.contains("12.3") && !text.contains("12.34"), "{language:?}: {text}");
-            let merging = tr_format!("Merging… {stage} {:.0}%", 42.4, stage = "Aligning");
-            assert!(merging.contains("42%"), "{language:?}: {merging}");
-            let delta = tr_format!("{label} {d:+} on every selected photo", label = "Exposure", d = 5);
-            assert!(delta.contains("+5"), "{language:?}: {delta}");
-            let reading = tr_format!("Reading photos… {} of {}", 3, 10);
-            let (three, ten) = (reading.find('3'), reading.find("10"));
-            assert!(three.is_some() && ten.is_some(), "{language:?}: {reading}");
-        }
-        set_language(Locale::En);
-        assert_eq!(tr_format!("Reading photos… {} of {}", 3, 10), "Reading photos… 3 of 10");
-    }
-
-    /// Every character a catalog paints has a glyph in the fonts the UI installs, so a translation
-    /// never shows as boxes. Without craft-fonts there are no CJK faces at all, and the CJK
-    /// catalogs are skipped (the same degradation the Japanese UI has always had).
-    #[test]
-    fn catalog_characters_are_paintable() {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::theme::font_definitions(lightcraft_engine::CRAFT_FONTS));
-        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
-        out.textures_delta.clear();
-        for language in Locale::ALL {
-            let messages = language.catalog();
-            if messages.is_empty() {
-                continue;
-            }
-            // The faces this language's script needs; a language the craft-fonts input does not
-            // cover (a translation added ahead of its font) is reported, not failed.
-            let mut faces: Vec<&str> =
-                lightcraft_engine::CRAFT_FONTS.iter().filter(|font| font.serves(language.script())).map(|font| font.family).collect();
-            faces.dedup();
-            if faces.is_empty() {
-                eprintln!("skipped {}: built without a craft-fonts face for {}", language.code(), language.script());
-                continue;
-            }
-            ctx.fonts_mut(|fonts| {
-                for family in [egui::FontFamily::Proportional, egui::FontFamily::Name(crate::theme::FONT_SEMIBOLD.into())] {
-                    let font = egui::FontId::new(13.0, family.clone());
-                    let mut missing: Vec<char> = messages
-                        .values()
-                        .flat_map(|message| message.chars())
-                        .filter(|ch| !ch.is_whitespace() && !fonts.has_glyph(&font, *ch))
-                        .collect();
-                    missing.sort_unstable();
-                    missing.dedup();
-                    assert!(
-                        missing.is_empty(),
-                        "{} in {family:?} (faces: {faces:?}) lack glyphs: {}",
-                        language.code(),
-                        missing.iter().collect::<String>()
-                    );
-                }
-            });
-        }
-    }
-
-    /// The interface's own symbols paint in every language: the CJK faces stop at Han and kana, so a
-    /// translation must not carry a symbol no installed font has (egui's defaults cover the rest).
-    #[test]
-    fn interface_symbols_are_paintable() {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::theme::font_definitions(lightcraft_engine::CRAFT_FONTS));
-        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
-        out.textures_delta.clear();
-        // ⌥ and ⌫ come from egui's bundled fonts; ▸ and ▾ are in neither (measured 2026-10-07).
-        ctx.fonts_mut(|fonts| {
-            for symbol in ['⌥', '⌫', '⇧', '⌘', '→', '…', '—', '“', '”', '·', '»', '⌄', '★'] {
-                let font = egui::FontId::new(13.0, egui::FontFamily::Proportional);
-                assert!(fonts.has_glyph(&font, symbol), "{symbol:?} has no glyph in any installed font");
-            }
-        });
-    }
-
-    /// The language menu covers every language, and a language's own command selects it.
-    #[test]
-    fn language_commands_cover_every_language() {
-        let commands = [
-            ("app.language.traditionalChinese", Locale::ZhHant),
-            ("app.language.english", Locale::En),
-            ("app.language.simplifiedChinese", Locale::ZhHans),
-            ("app.language.japanese", Locale::Ja),
-            ("app.language.portuguese", Locale::PtBr),
-            ("app.language.spanish", Locale::Es),
-            ("app.language.german", Locale::De),
-            ("app.language.russian", Locale::Ru),
-        ];
-        // One command per language, and every command reachable from the menu table.
-        assert_eq!(commands.len(), Locale::ALL.len());
-        for (id, language) in commands {
-            assert_eq!(crate::menus::language_from_command(id), Some(language), "{id}");
-            assert!(crate::menus::ui_commands().any(|command| command.0 == id), "{id} is not in the menu");
-        }
-        assert_eq!(crate::menus::language_from_command("app.language.klingon"), None);
-        assert_eq!(crate::menus::language_from_command("view.detail"), None);
-    }
-
-    #[test]
-    fn preferences_round_trip_and_old_settings_remain_readable() {
-        let old: crate::state::UiState = serde_json::from_str("{}").unwrap();
-        assert_eq!(old.language, Locale::En);
-        // Settings written before the language list grew still load.
-        let legacy: crate::state::UiState = serde_json::from_str(r#"{"language":"ja"}"#).unwrap();
-        assert_eq!(legacy.language, Locale::Ja);
-        let settings = crate::state::UiState { language: Locale::ZhHans, ..old };
-        let saved = serde_json::to_string(&settings).unwrap();
-        let restored: crate::state::UiState = serde_json::from_str(&saved).unwrap();
-        assert_eq!(restored.language, Locale::ZhHans);
-    }
-
-    #[test]
-    fn catalogs_contain_core_workflows() {
-        for language in Locale::ALL.iter().filter(|language| **language != Locale::En) {
-            for key in ["Import Photos…", "Export…", "Exposure", "White Balance", "Settings", "Language"] {
-                let value = language.tr(key);
-                assert!(!value.is_empty() && value != key, "{language:?}: {key}");
-            }
-        }
-    }
-
-    /// Every command, control, rule and rename label, and every line of What's New, is a message a
-    /// catalog can translate. What a language lacks is reported, not failed (like
-    /// `catalogs_agree_on_placeholders_and_report_gaps`): a feature PR doesn't have to ship every
-    /// language, and the translations catch up at their own pace.
-    #[test]
-    fn display_label_gaps_are_reported() {
-        let mut labels: Vec<&str> = lightcraft_engine::command_specs().iter().map(|spec| spec.label).collect();
-        labels.extend(crate::menus::ui_commands().map(|command| command.1).filter(|label| !Locale::ALL.iter().any(|locale| locale.name() == *label)));
-        labels.extend(lightcraft_develop::CONTROLS.iter().map(|control| control.label));
-        for (_, label, kind) in lightcraft_catalog::rules::FIELDS {
-            labels.push(label);
-            labels.extend(lightcraft_catalog::rules::ops_for(*kind).iter().map(|(_, label)| *label));
-        }
-        labels.extend(lightcraft_engine::rename::TOKENS.iter().map(|token| token.meaning));
-        labels.extend(lightcraft_engine::rename::TEMPLATE_NOTES);
-        let ui_labels = labels.len();
-        for line in crate::panels::dialogs::WHATS_NEW.lines().map(str::trim) {
-            if line.is_empty() || line.starts_with("# ") {
-                continue;
-            }
-            let label = line.strip_prefix("### ").or_else(|| line.strip_prefix("## ")).or_else(|| line.strip_prefix("- ")).unwrap_or(line);
-            labels.push(label);
-        }
-        for language in Locale::ALL.iter().filter(|language| **language != Locale::En) {
-            let catalog = language.catalog();
-            let missing: Vec<&&str> = labels[..ui_labels].iter().filter(|label| !catalog.contains_key(**label)).collect();
-            let notes = labels[ui_labels..].iter().filter(|label| !catalog.contains_key(**label)).count();
-            if !missing.is_empty() || notes > 0 {
-                eprintln!(
-                    "{} lacks {} display label(s) (shown in English): {missing:?}; and {notes} What's New line(s)",
-                    language.code(),
-                    missing.len()
-                );
-            }
-        }
-        // the German catalog, which set out to cover them all, still covers every other catalog
-        let german = Locale::De.catalog();
-        let gaps: Vec<&String> =
-            Locale::ALL.iter().flat_map(|language| language.catalog().keys()).filter(|key| !german.contains_key(key.as_str())).collect();
-        if !gaps.is_empty() {
-            eprintln!("de lacks {} message(s) another catalog has: {gaps:?}", gaps.len());
-        }
-    }
-
-    #[test]
-    fn german_switches_via_menu_and_control_persists_and_formats_dates() {
-        use crate::control::{ControlRequest, Outcome};
-        let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::with_demo(), Default::default());
-        app.run("app.language.german", serde_json::json!({})).unwrap();
-        assert_eq!(app.ui.language, Locale::De);
-        assert_eq!(tr("File"), "Datei");
-        assert_eq!(crate::menubar::checked(&app, "app.language.german"), Some(true));
-        assert_eq!(date_group_label("2026-09-20", false), "Sonntag, 20.09.2026");
-        assert_eq!(date_group_label("2026-09-20", true), "Sonntag, 20.");
-        assert_eq!(date_group_label("2026-09", false), "09/2026");
-        assert_eq!(display_time("2026-09-20T16:04:05"), "Sonntag, 20.09.2026 16:04:05");
-        assert_eq!(tr_format!("Imported {} photo{}", 1, ""), "1 Foto importiert");
-        assert_eq!(tr_format!("Imported {} photo{}", 12, "s"), "12 Fotos importiert");
-        assert_eq!(tr_format!("Added {n} photo{} to “{}”", "s", "Color", n = 12), "12 Fotos zu „Color“ hinzugefügt");
-        let saved = serde_json::to_string(&app.ui).unwrap();
-        assert!(saved.contains(r#""language":"de""#));
-        assert_eq!(serde_json::from_str::<crate::state::UiState>(&saved).unwrap().language, Locale::De);
-        let ctx = egui::Context::default();
-        for code in ["de-DE", "de_AT.UTF-8", "de-CH"] {
-            let (req, _) = ControlRequest::new("ui.set", serde_json::json!({"language": code}));
-            let Outcome::Done(reply) = crate::control::handle(&mut app, &ctx, &req) else { panic!("expected reply") };
-            assert_eq!(reply["ok"], true);
-            assert_eq!(language(), Locale::De);
-        }
-        assert_eq!(builtin_label("Warm Glow", false), "Warm Glow");
-        assert_eq!(builtin_label("Warm Glow", true), "Warmer Glanz");
-        assert_eq!(tr("my-photo.jpg"), "my-photo.jpg");
-        let rules = lightcraft_catalog::RuleSet {
-            mode: lightcraft_catalog::Match::All,
-            rules: vec![lightcraft_catalog::Rule::Field { field: "keywords".into(), op: "contains".into(), value: serde_json::json!("Color") }],
-        };
-        assert_eq!(rules_label(&rules), "Stichwörter enthält Color");
-        let filter = lightcraft_catalog::Filter {
-            labels: vec![lightcraft_catalog::ColorLabel::Red, lightcraft_catalog::ColorLabel::Blue],
-            ..Default::default()
-        };
-        assert_eq!(filter_label(&filter, &app.session.catalog), "Farbmarkierung: Rot oder Blau");
-        app.run("label.setNames", serde_json::json!({"names": {"red": "Color"}})).unwrap();
-        assert_eq!(filter_label(&filter, &app.session.catalog), "Farbmarkierung: Color oder Blau");
-        set_language(Locale::En);
-    }
-
-    #[test]
-    fn german_panels_dialogs_and_glyphs_are_painted_without_extra_fonts() {
-        let ctx = fonts_ctx(&[]);
-        let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::with_demo(), Default::default());
-        app.ui.left_panel = true;
-        let text = painted_text(&ctx, &mut app, Locale::De);
-        assert!(text.contains("Meine Fotos") && text.contains("Alle Fotos"), "{text}");
-        app.ui.view = crate::state::ViewMode::People;
-        let text = painted_text(&ctx, &mut app, Locale::De);
-        assert!(text.contains("Benannte Personen"), "{text}");
-        for (command, title) in [("app.about", "Über LightCraft"), ("app.shortcuts", "Tastenkürzel"), ("app.settings", "Einstellungen")] {
-            app.ui.dialog = None;
-            app.run(command, serde_json::json!({})).unwrap();
-            let text = painted_text(&ctx, &mut app, Locale::De);
-            assert!(text.contains(title), "{command}: {text}");
-        }
-        ctx.fonts_mut(|fonts| {
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Name(crate::theme::FONT_SEMIBOLD.into())] {
-                let font = egui::FontId::new(13.0, family);
-                for ch in "ÄÖÜäöüß„“".chars() {
-                    assert!(fonts.has_glyph(&font, ch), "missing German glyph {ch}");
-                }
-            }
-        });
-        set_language(Locale::En);
-    }
-
-    #[test]
-    fn german_buttons_fit_the_bottom_bar_and_export_dialog() {
-        fn collect(shape: &egui::epaint::Shape, bounds: &mut Vec<(String, egui::Rect)>) {
-            match shape {
-                egui::epaint::Shape::Text(shape) => {
-                    bounds.push((shape.galley.job.text.clone(), egui::Rect::from_min_size(shape.pos, shape.galley.size())))
-                }
-                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, bounds)),
-                _ => {}
-            }
-        }
-        let ctx = fonts_ctx(&[]);
-        let services = crate::Services { pick_folder: Some(Box::new(|| None)), ..Default::default() };
-        let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::with_demo(), services);
-        app.ui.language = Locale::De;
-        let mut bounds = Vec::new();
-        for export in [false, true] {
-            if export {
-                app.run("dialog.export", serde_json::json!({})).unwrap();
-            }
-            for frame in 0..4 {
-                let input = crate::headless::HeadlessView::raw_input(egui::vec2(1600.0, 1000.0), 1.0, frame as f64 / 60.0, vec![]);
-                let mut out = ctx.run_ui(input, |ui| {
-                    app.logic(ui.ctx());
-                    app.ui(ui);
-                });
-                out.textures_delta.clear();
-                bounds.clear();
-                for shape in out.shapes {
-                    collect(&shape.shape, &mut bounds);
-                }
-            }
-            let rect = |id: &str| app.widgets.iter().find(|entry| entry.0 == id).unwrap().1;
-            if export {
-                let dialog = rect("dialog:window");
-                for id in ["button:exportNamingTags", "button:exportChooseFolder", "button:exportSavePreset"] {
-                    assert!(dialog.contains_rect(rect(id)), "{id} spills outside {dialog:?}: {:?}", rect(id));
-                }
-            } else {
-                let button = rect("button:copySettings");
-                let (_, text) = bounds.iter().find(|entry| entry.0 == "Bearbeitungseinstellungen kopieren").unwrap();
-                assert!(button.contains_rect(*text), "German copy caption overflows its button: {text:?} vs {button:?}");
-                assert!(!button.intersects(rect("icon:copyGear")));
-            }
-        }
-        set_language(Locale::En);
-    }
-
-    /// User-named menu items (presets, albums, label sets) are never translated; built-in labels are.
-    #[test]
-    fn menu_labels_translate_but_user_names_survive() {
-        for language in Locale::ALL {
-            set_language(*language);
-            assert_eq!(crate::menubar::display_item_label("album.addPhotos", &serde_json::json!({"id": 1}), "Color"), "Color");
-            assert_eq!(crate::menubar::display_item_label("app.export", &serde_json::json!({"preset": "Color"}), "Color"), "Color");
-            assert_eq!(crate::menubar::display_item_label("view.photoGrid", &serde_json::Value::Null, "Color"), language.tr("Color"));
-        }
-        set_language(Locale::ZhHans);
-        assert_eq!(crate::menubar::display_item_label("view.photoGrid", &serde_json::Value::Null, "Color"), "颜色");
-        set_language(Locale::Ja);
-        assert_eq!(crate::menubar::display_item_label("view.photoGrid", &serde_json::Value::Null, "Color"), "カラー");
-        set_language(Locale::En);
-    }
-
-    /// The text the whole window paints over a few frames in `language`.
-    fn painted_text(ctx: &egui::Context, app: &mut crate::LightcraftApp, language: Locale) -> String {
-        fn collect(shape: &egui::epaint::Shape, text: &mut String) {
-            match shape {
-                egui::epaint::Shape::Text(shape) => {
-                    text.push_str(&shape.galley.job.text);
-                    text.push('\n');
-                }
-                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, text)),
-                _ => {}
-            }
-        }
-        app.ui.language = language;
-        let mut text = String::new();
-        for frame in 0..4 {
-            let input = crate::headless::HeadlessView::raw_input(egui::vec2(1600.0, 1000.0), 1.0, frame as f64 / 60.0, vec![]);
-            let mut out = ctx.run_ui(input, |ui| {
-                app.logic(ui.ctx());
-                app.ui(ui);
-            });
-            // This inspects shapes without a renderer; discard texture uploads explicitly.
-            out.textures_delta.clear();
-            text.clear();
-            for shape in out.shapes {
-                collect(&shape.shape, &mut text);
-            }
-        }
-        text
-    }
-
-    /// Every language is painted by the real window, switching at runtime reinstalls the fonts
-    /// (their CJK fallback order follows the language), and command ids never change with it.
-    #[test]
-    fn every_language_is_painted_and_menu_ids_stay_the_same() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::with_demo(), Default::default());
-        app.ui.left_panel = true;
-        let ids = |app: &crate::LightcraftApp| crate::menus::menu_entries(app).into_iter().map(|entry| entry.id).collect::<Vec<_>>();
-        let english_ids = ids(&app);
-        for language in Locale::ALL {
-            let text = painted_text(&ctx, &mut app, *language);
-            for label in ["My Photos", "All Photos"] {
-                assert!(text.contains(language.tr(label)), "{language:?}: {label} -> {:?} not in\n{text}", language.tr(label));
-            }
-            assert_eq!(app.font_language, *language, "the fonts follow the language");
-            assert_eq!(ids(&app), english_ids, "{language:?}: command ids are presentation-independent");
-        }
-        let text = painted_text(&ctx, &mut app, Locale::Ja);
-        assert!(text.contains("マイフォト") && text.contains("すべての写真"), "{text}");
-        let text = painted_text(&ctx, &mut app, Locale::ZhHans);
-        assert!(text.contains("我的照片") && text.contains("所有照片"), "{text}");
-        let text = painted_text(&ctx, &mut app, Locale::PtBr);
-        assert!(text.contains("Minhas fotos") && text.contains("Todas as fotos"), "{text}");
-        set_language(Locale::En);
-    }
-
-    /// The UI families, after one frame so the font definitions are loaded.
-    fn fonts_ctx(craft: &'static [lightcraft_engine::CraftFont]) -> egui::Context {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(crate::theme::font_definitions(craft));
-        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
-        out.textures_delta.clear();
-        ctx
-    }
-
-    /// Built with craft-fonts, every CJK language renders with real glyphs (no tofu) in every UI
-    /// family, Monospace included.
-    #[test]
-    fn craft_fonts_render_cjk_in_the_ui() {
-        let samples = [(Locale::Ja, "日本語の文字"), (Locale::ZhHans, "简体中文字"), (Locale::ZhHant, "繁體中文字")];
-        for (language, sample) in samples {
-            if !lightcraft_engine::CRAFT_FONTS.iter().any(|font| font.serves(language.script())) {
-                eprintln!("skipped {}: built without a craft-fonts face for {}", language.code(), language.script());
-                continue;
-            }
-            set_language(language);
-            let ctx = fonts_ctx(lightcraft_engine::CRAFT_FONTS);
-            ctx.fonts_mut(|fonts| {
-                for family in
-                    [egui::FontFamily::Proportional, egui::FontFamily::Name(crate::theme::FONT_SEMIBOLD.into()), egui::FontFamily::Monospace]
-                {
-                    let font = egui::FontId::new(13.0, family);
-                    for ch in sample.chars() {
-                        assert!(fonts.has_glyph(&font, ch), "{language:?}: {ch} in {font:?}");
-                    }
-                    let galley = fonts.layout_no_wrap(sample.into(), font.clone(), egui::Color32::WHITE);
-                    let wide = 13.0 * (sample.chars().count() as f32 - 1.0);
-                    assert!(galley.size().x > wide, "{language:?} {font:?}: full-width glyphs, {:?}", galley.size());
-                }
-            });
-        }
-        set_language(Locale::En);
-    }
-
-    /// Built without craft-fonts, the UI (in every language) still installs its fonts and runs;
-    /// Latin text keeps Inter.
-    #[test]
-    fn the_ui_works_without_craft_fonts() {
-        let ctx = fonts_ctx(&[]);
-        ctx.fonts_mut(|fonts| {
-            // (Not Monospace: egui's `has_glyph` reports false for glyphs of the family's
-            // replacement-glyph face, which there is Hack, the face that draws Latin.)
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Name(crate::theme::FONT_SEMIBOLD.into())] {
-                let font = egui::FontId::new(13.0, family);
-                assert!("LightCraft".chars().all(|ch| fonts.has_glyph(&font, ch)), "{font:?}");
-            }
-        });
-        let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::with_demo(), Default::default());
-        for language in Locale::ALL {
-            app.ui.language = *language;
-            for frame in 0..3 {
-                let input = crate::headless::HeadlessView::raw_input(egui::vec2(1200.0, 800.0), 1.0, frame as f64 / 60.0, vec![]);
-                let mut out = ctx.run_ui(input, |ui| {
-                    app.logic(ui.ctx());
-                    app.ui(ui);
-                });
-                out.textures_delta.clear();
-            }
-        }
-        set_language(Locale::En);
-    }
-
-    /// Traditional Chinese through the menu command and the control channel, persisted, with
-    /// localised headings and dates; ids and user text are untouched.
-    #[test]
-    fn traditional_chinese_switches_through_menu_and_control_and_persists() {
-        use crate::control::{ControlRequest, Outcome};
-        let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::with_demo(), Default::default());
-        app.run("app.language.traditionalChinese", serde_json::json!({})).unwrap();
-        assert_eq!(app.ui.language, Locale::ZhHant);
-        // Applied at once, not on the next frame.
-        assert_eq!(tr("File"), "檔案");
-        assert_eq!(source_label(lightcraft_engine::LibrarySource::All, &app.session.catalog), "所有照片");
-        assert_eq!(date_group_label("2026-09-20", false), "2026年9月20日 星期日");
-        assert_eq!(date_group_label("2026-09-20", true), "20日 星期日");
-        assert_eq!(date_group_label("2026-09", false), "2026年9月");
-        assert_eq!(date_group_label("2026-09", true), "9月");
-        assert_eq!(date_group_label("2026", false), "2026年");
-        assert_eq!(date_group_label("", false), "未知日期");
-        assert_eq!(display_time("2026-09-20T16:04:05"), "2026年9月20日 星期日 16:04:05");
-        assert_eq!(display_time("a-user-value"), "a-user-value");
-        assert_eq!(crate::menubar::checked(&app, "app.language.traditionalChinese"), Some(true));
-        assert_eq!(crate::menubar::checked(&app, "app.language.english"), Some(false));
-        assert_eq!(tr("my-photo.jpg"), "my-photo.jpg");
-        for id in ["album.addPhotos", "metadata.applyPreset", "label.applySet"] {
-            assert_eq!(crate::menubar::display_item_label(id, &serde_json::json!({"id": 1}), "Color"), "Color");
-        }
-        assert_eq!(crate::menubar::display_item_label("view.photoGrid", &serde_json::Value::Null, "Color"), "色彩");
-        assert_eq!(tr_format!("{n} photo{}", "s", n = 12), "12 張照片");
-        assert_eq!(tr_format!("Exported {ok} of {total} photo{}", "s", ok = 4, total = 12), "已匯出 4／12 張照片");
-        let saved = serde_json::to_string(&app.ui).unwrap();
-        assert!(saved.contains(r#""language":"zh-hant""#), "{saved}");
-        assert_eq!(serde_json::from_str::<crate::state::UiState>(&saved).unwrap().language, Locale::ZhHant);
-        let ctx = egui::Context::default();
-        app.ui.language = Locale::En;
-        for code in ["zh-hant", "zh-Hant", "zh-TW", "zh_TW", "zh-HK"] {
-            let (req, _) = ControlRequest::new("ui.set", serde_json::json!({"language": code}));
-            let Outcome::Done(reply) = crate::control::handle(&mut app, &ctx, &req) else { panic!("expected a reply") };
-            assert_eq!(reply["ok"], true, "{code}");
-            assert_eq!(app.ui.language, Locale::ZhHant, "{code}");
-            assert_eq!(language(), Locale::ZhHant, "{code} applies at once");
-        }
-        let (req, _) = ControlRequest::new("ui.set", serde_json::json!({"language": "xx"}));
-        let Outcome::Done(reply) = crate::control::handle(&mut app, &ctx, &req) else { panic!("expected a reply") };
-        assert_eq!(reply["ok"], false);
-        assert_eq!(app.ui.language, Locale::ZhHant);
-        let ids = |app: &crate::LightcraftApp| crate::menus::menu_entries(app).into_iter().map(|entry| entry.id).collect::<Vec<_>>();
-        let chinese_ids = ids(&app);
-        app.run("app.language.english", serde_json::json!({})).unwrap();
-        assert_eq!(tr("File"), "File");
-        assert_eq!(chinese_ids, ids(&app));
-    }
-
-    /// Dates follow every language's own patterns; English keeps the catalog's wording.
-    #[test]
-    fn date_headings_in_every_language() {
-        set_language(Locale::En);
-        assert_eq!(date_group_label("2026-09-20", false), "Sunday, 20 September 2026");
-        assert_eq!(date_group_label("2026-09-20", true), "Sunday, 20");
-        assert_eq!(date_group_label("2026-09", true), "September");
-        assert_eq!(display_time("2026-09-20T16:04:05"), lightcraft_catalog::dates::display_time("2026-09-20T16:04:05"));
-        set_language(Locale::Ja);
-        assert_eq!(date_group_label("2026-09-20", false), "2026年9月20日（日曜日）");
-        assert_eq!(date_group_label("2026-09", true), "9月");
-        set_language(Locale::ZhHans);
-        assert_eq!(date_group_label("2026-09-20", false), "2026年9月20日 星期日");
-        for language in Locale::ALL {
-            set_language(*language);
-            // A key that is not a date never panics and never shows a raw pattern.
-            for key in ["", "abcd", "2026-xx", "2026-13", "2026-09-xx", "２０２６-09"] {
-                assert!(!date_group_label(key, false).contains('{'), "{language:?}: {key:?}");
-                assert!(!date_group_label(key, true).contains('{'), "{language:?}: {key:?}");
-            }
-        }
-        set_language(Locale::En);
-    }
-
-    /// Stock presets and panel headers are translated; a user preset keeps its name, also when it
-    /// shares a stock preset's name.
-    #[test]
-    fn traditional_chinese_presets_and_panel_headers_are_painted() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::with_demo(), Default::default());
-        app.ui.presets = true;
-        let builtin = app.session.presets.iter().find(|p| p.name == "Warm Glow").unwrap().clone();
-        app.session.presets.push(lightcraft_develop::Preset { id: "user.test".into(), builtin: false, ..builtin });
-        for (panel, title) in [(crate::state::RightPanel::Activity, "歷史紀錄"), (crate::state::RightPanel::Versions, "版本")] {
-            app.ui.right = panel;
-            let text = painted_text(&ctx, &mut app, Locale::ZhHant);
-            assert!(text.contains(title), "{text}");
-            assert!(!text.contains("History") && !text.contains("Versions"), "{text}");
-            assert!(text.contains("暖光"), "stock preset: {text}");
-            assert!(text.contains("Warm Glow"), "user preset: {text}");
-            assert!(text.contains("色彩"), "stock group: {text}");
-        }
-        assert_eq!(history_label("Exposure", &app.session.presets), "曝光");
-        assert_eq!(history_label("Preset: Warm Film", &app.session.presets), "預設集：暖調底片");
-        assert_eq!(history_label("Preset: Warm Glow", &app.session.presets), "預設集：Warm Glow");
-        set_language(Locale::En);
+    fn language_menu_lists_the_picker_order() {
+        let menu: Vec<&str> = crate::menus::LANGUAGE_COMMANDS.iter().map(|c| c.1).collect();
+        let picker: Vec<&str> = Locale::for_picker().into_iter().map(Locale::name).collect();
+        assert_eq!(menu, picker, "Edit ▸ Language and the Settings row list the languages the same way");
     }
 }

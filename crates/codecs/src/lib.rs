@@ -6,33 +6,46 @@
 //!   profiles (matrix/TRC exactly, LUT/CMYK via the `moxcms` CMS), 16-bit and float precision are
 //!   preserved. EXIF/XMP/ICC blobs are passed through untouched; orientation is reported, never applied.
 //! - [`to_working`] converts a decode result to linear Rec.2020 D65 (the pipeline working space).
+//! - [`read_header`] reads a file's stored dimensions and orientation from its headers, without
+//!   decoding pixels (import probes).
 //! - [`decode_thumbnail`] is the fast path for grid thumbnails (EXIF thumbnail or DCT-scaled decode).
-//! - [`encode`] writes JPEG, PNG, TIFF, lossless WebP and (native, feature `avif`) AVIF, embedding
+//! - [`encode`] writes JPEG, PNG, TIFF, lossless WebP and, on native targets, AVIF (feature `avif`) and
+//!   JPEG XL ([`encode_jxl`], feature `jxl`), embedding
 //!   ICC/EXIF/XMP. [`icc::write_matrix_trc`] builds profiles for export.
+//! - [`video`] encodes AV1 video (native, feature `avif`) and writes it as MP4 or WebM.
 //!
 //! No decoder panics on malformed input (property-tested).
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod convert;
+pub mod display;
 pub mod encode;
 pub mod exif;
+pub mod gainmap;
+mod heif;
 pub mod icc;
 mod jpeg;
 pub mod jpeg_par;
 #[cfg(feature = "jxl")]
 mod jxl;
+mod jxl_encode;
 mod other;
 mod png_codec;
+pub mod print;
+pub mod proof;
 mod psd;
 mod sniff;
 pub mod space;
 mod tiff_codec;
+pub mod video;
 mod webp;
 
 pub use encode::{
-    ChromaSubsampling, EncodeImage, EncodeMeta, Samples, TiffCompression, encode_avif, encode_jpeg, encode_png, encode_tiff, encode_webp_lossless,
+    ChromaSubsampling, EncodeImage, EncodeMeta, HDR_REFERENCE_WHITE_NITS, HLG_REFERENCE_PEAK_NITS, HdrTransfer, Samples, TiffCompression,
+    encode_avif, encode_avif_hdr, encode_avif_pq, encode_jpeg, encode_png, encode_png_pq, encode_psd, encode_tiff, encode_webp_lossless, hlg_signal,
 };
+pub use jxl_encode::{JxlColour, JxlEffort, JxlOptions, encode_jxl};
 pub use sniff::{Format, sniff};
 pub use space::{NamedSpace, SourceSpace, SpaceOrigin, Trc};
 
@@ -156,6 +169,69 @@ pub fn decode(bytes: &[u8], opts: DecodeOptions) -> Result<Decoded> {
     std::panic::catch_unwind(|| decode_unguarded(bytes, format, &opts)).unwrap_or_else(|_| Err(Error::Malformed(format, "decoder panicked".into())))
 }
 
+/// A JPEG for display, fast: fitted within `max_w × max_h` (never enlarged) as 8-bit sRGB with its
+/// EXIF orientation (1..=8, not applied), the picture `decode(bytes, DecodeOptions::fit(..))
+/// .to_srgb8()` gives within a few levels, in about half the time for a large camera preview.
+/// `Ok(None)` when the file is not a plain 8-bit sRGB JPEG (an ICC profile or an Adobe RGB EXIF
+/// hint, CMYK, 12-bit, lossless or arithmetic coding) or its headers can't be read: use
+/// [`decode`], which reports a malformed header as an error. Bad scan data is an error here, and
+/// nothing is ever a panic.
+pub fn decode_jpeg_srgb8_fit(bytes: &[u8], max_w: u32, max_h: u32) -> Result<Option<(lightcraft_raster::Rgba8, u16)>> {
+    if sniff(bytes) != Some(Format::Jpeg) {
+        return Ok(None);
+    }
+    std::panic::catch_unwind(|| jpeg::srgb8_fit(bytes, max_w, max_h))
+        .unwrap_or_else(|_| Err(Error::Malformed(Format::Jpeg, "decoder panicked".into())))
+}
+
+/// What a file's headers say about its image: enough to catalogue it without decoding pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Header {
+    pub format: Format,
+    /// Full-resolution stored dimensions, orientation **not** applied ([`Decoded::source_width`]).
+    pub width: u32,
+    pub height: u32,
+    /// EXIF/TIFF orientation 1..=8, 1 when absent ([`Decoded::orientation`]).
+    pub orientation: u16,
+}
+
+/// Read the stored dimensions and orientation of any format [`decode`] supports, agreeing with
+/// what a decode reports, without decoding pixels: JPEG, PNG, TIFF, WebP, PSD and HEIF are read
+/// from their headers (markers, chunks, IFD, resources, boxes). GIF, BMP and JPEG XL fall back to
+/// a small decode.
+///
+/// The header readers also refuse what a decode would refuse before reaching the pixels (an
+/// unsupported layout, compression or frame type) and files whose image data is cut short
+/// (truncated: the data runs past the end of the file, or a JPEG's markers don't reach its
+/// end-of-image marker). Damage *inside* compressed data that is all present is only found by a
+/// decode. Malformed input yields an error, never a panic (as for [`decode`], a panic inside a
+/// third-party parser is caught on unwinding targets).
+pub fn read_header(bytes: &[u8]) -> Result<Header> {
+    let format = sniff(bytes).ok_or(Error::UnknownFormat)?;
+    std::panic::catch_unwind(|| read_header_unguarded(bytes, format))
+        .unwrap_or_else(|_| Err(Error::Malformed(format, "header reader panicked".into())))
+}
+
+/// [`read_header`] without the panic guard (for fuzzing our own code paths).
+#[doc(hidden)]
+pub fn read_header_unguarded(bytes: &[u8], format: Format) -> Result<Header> {
+    let (width, height, orientation) = match format {
+        Format::Jpeg => jpeg::header(bytes)?,
+        Format::Png => png_codec::header(bytes)?,
+        Format::Tiff => tiff_codec::header(bytes)?,
+        Format::WebP => webp::header(bytes)?,
+        Format::Psd => psd::header(bytes)?,
+        Format::Heif => heif::header(bytes)?,
+        Format::Gif | Format::Bmp => other::header(bytes, format)?,
+        // rare here (or, for JPEG XL, without a header reader yet): a small decode, as before
+        _ => {
+            let d = decode_unguarded(bytes, format, &DecodeOptions::fit(64, 64))?;
+            (d.source_width, d.source_height, d.orientation)
+        }
+    };
+    Ok(Header { format, width, height, orientation })
+}
+
 /// Decode a JPEG preview with its enclosing container's colour space as a fallback.
 /// A JPEG carrying ICC or EXIF metadata keeps its own interpretation. The fallback is applied
 /// before transfer decoding and linear-light resizing, never to already-resampled pixels.
@@ -168,6 +244,8 @@ pub fn decode_jpeg_with_fallback(bytes: &[u8], opts: DecodeOptions, fallback: Na
 #[doc(hidden)]
 pub fn decode_unguarded(bytes: &[u8], format: Format, opts: &DecodeOptions) -> Result<Decoded> {
     let opts = *opts;
+    // The reason a format can't be decoded lives in one place, `Format::not_decodable`.
+    let unsupported = || Err(Error::Unsupported(format, format.not_decodable().unwrap_or("not decodable in this build")));
     match format {
         Format::Jpeg => jpeg::decode(bytes, &opts),
         Format::Png => png_codec::decode(bytes, &opts),
@@ -178,20 +256,31 @@ pub fn decode_unguarded(bytes: &[u8], format: Format, opts: &DecodeOptions) -> R
         #[cfg(feature = "jxl")]
         Format::Jxl => jxl::decode(bytes, &opts),
         #[cfg(not(feature = "jxl"))]
-        Format::Jxl => Err(Error::Unsupported(format, "built without the `jxl` feature")),
-        Format::Avif => Err(Error::Unsupported(format, "no pure-Rust, permissively licensed AV1 decoder yet")),
-        Format::Heif => Err(Error::Unsupported(format, "no pure-Rust, permissively licensed HEVC decoder yet")),
-        Format::RawTiffLike | Format::RawOther => Err(Error::Unsupported(format, "camera raw: decode with lightcraft-raw")),
+        Format::Jxl => unsupported(),
+        Format::Heif => heif::decode(bytes, &opts),
+        Format::Avif | Format::RawTiffLike | Format::RawOther => unsupported(),
     }
 }
 
 /// Convert a decode result to linear Rec.2020 D65 (Bradford-adapted), the develop working space.
+///
+/// The working space has no alpha: transparency is flattened onto white, in linear light like the rest
+/// of the pipeline (issue #1212).
 pub fn to_working(d: &Decoded) -> Rgb32f {
-    if d.space.is_working() {
-        return d.image.clone();
+    let mut img = if d.space.is_working() {
+        d.image.clone()
+    } else {
+        let m = d.space.to_working().to_f32();
+        d.image.map(|p| mat_apply(&m, p))
+    };
+    // white is (1, 1, 1) in the working space too: the conversion is white-preserving
+    if let Some(a) = d.alpha.as_ref().filter(|a| a.width == img.width && a.height == img.height) {
+        for (p, &av) in img.data.iter_mut().zip(&a.data) {
+            let av = av.clamp(0.0, 1.0);
+            *p = p.map(|c| c * av + (1.0 - av));
+        }
     }
-    let m = d.space.to_working().to_f32();
-    d.image.map(|p| mat_apply(&m, p))
+    img
 }
 
 /// Where a thumbnail came from.
@@ -264,4 +353,30 @@ pub fn decode_thumbnail_with(bytes: &[u8], opts: &ThumbnailOptions) -> Result<Th
         source_width: d.source_width,
         source_height: d.source_height,
     })
+}
+
+/// Checked sample-buffer length `width × height × ch`, in u64: `None` on overflow or a zero
+/// dimension. Image size is capped by `DecodeOptions::max_pixels` alone; once the buffer is known to
+/// hold this many samples, every later `usize` product is bounded by an allocation that exists.
+pub(crate) fn checked_sample_buf_len(width: usize, height: usize, ch: usize) -> Option<u64> {
+    (width as u64).checked_mul(height as u64).and_then(|n| n.checked_mul(ch as u64)).filter(|&n| n > 0)
+}
+
+#[cfg(test)]
+mod checked_arithmetic_tests {
+    use super::*;
+
+    #[test]
+    fn checked_sample_buf_len_wrap_inputs_rejected() {
+        assert_eq!(checked_sample_buf_len(usize::MAX, usize::MAX, 4), None);
+        assert_eq!(checked_sample_buf_len(0, 1, 3), None);
+    }
+
+    #[test]
+    fn checked_sample_buf_len_normal_accepted() {
+        assert_eq!(checked_sample_buf_len(100, 1, 3), Some(300));
+        assert_eq!(checked_sample_buf_len(1, 1, 1), Some(1));
+        // 300 Mpx RGBA is within the default pixel limit, so it must not be refused by sample count.
+        assert_eq!(checked_sample_buf_len(20_000, 15_000, 4), Some(1_200_000_000));
+    }
 }

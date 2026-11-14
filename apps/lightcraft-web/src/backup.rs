@@ -11,8 +11,9 @@
 //!
 //! Restoring never deletes anything: the library files go to a new library folder in browser
 //! storage, originals that aren't stored yet are added (they're named by content, so existing
-//! ones are identical), and only then does a small pointer file ([`ACTIVE_LIBRARY`]) switch to
-//! the restored library. The library that was there before stays in storage.
+//! ones are identical; a restored one must match its content hash, see [`verify_original`]),
+//! and only then does a small pointer file ([`ACTIVE_LIBRARY`]) switch to the restored library.
+//! The library that was there before stays in storage.
 //!
 //! No zip64: a backup holds at most [`MAX_BYTES`] and 65 535 entries.
 
@@ -49,6 +50,18 @@ pub fn valid_library_dir(name: &str) -> bool {
 /// Is `h` a plausible content hash (used as a storage key segment)?
 pub fn valid_hash(h: &str) -> bool {
     !h.is_empty() && h.len() <= 128 && h.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Why a backup can't start yet, given [`lightcraft_engine::Session::unsaved`]: changes applied in
+/// the app but not yet written to browser storage (a save failed). The zip copies the stored
+/// library files, so it would report success while missing them; `None` when everything is saved.
+pub fn unsaved_refusal(unsaved: Option<(usize, &str)>) -> Option<String> {
+    let (ops, why) = unsaved?;
+    let changes = if ops == 1 { "1 change".to_string() } else { format!("{ops} changes") };
+    Some(format!(
+        "Backup not started: {changes} could not be saved to browser storage yet ({why}), so the backup would miss them. \
+         Free up storage space; LightCraft retries the save with every change. Back up once nothing is left unsaved."
+    ))
 }
 
 /// Zip entry name for an original.
@@ -220,6 +233,25 @@ pub fn parse_central(cd: &[u8]) -> Result<Vec<ZipEntry>, String> {
     Ok(out)
 }
 
+/// What a restore writes, each storage key once, checked against the whole directory before any
+/// payload is read: a backup names a file once, so a directory naming the same destination again
+/// is damaged or altered, and its entries' bytes can't add up to more than the file holds (a
+/// directory can point many entries at one stored range and have each read, checked and written).
+pub fn restore_plan<'a>(entries: &'a [ZipEntry], dir: &str, file_len: u64) -> Result<Vec<(String, &'a ZipEntry)>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut plan = Vec::new();
+    let mut bytes = 0u64;
+    for e in entries {
+        let Some(key) = restore_key(&e.name, dir) else { continue };
+        if !seen.insert(key.clone()) {
+            return Err(format!("{}: listed twice (damaged or altered backup)", e.name));
+        }
+        bytes = bytes.checked_add(e.size).filter(|&b| b <= file_len).ok_or_else(|| format!("{}: entries larger than the backup itself", e.name))?;
+        plan.push((key, e));
+    }
+    Ok(plan)
+}
+
 /// Offset of an entry's data from its local header's first 30 bytes.
 pub fn data_offset(entry: &ZipEntry, local: &[u8]) -> Result<u64, String> {
     if rd32(local, 0) != Some(LOCAL_SIG) {
@@ -237,6 +269,16 @@ pub fn verify(entry: &ZipEntry, data: &[u8]) -> Result<(), String> {
     }
     if data.len() as u64 != entry.size || crc32fast::hash(data) != entry.crc {
         return Err(format!("{}: damaged (checksum mismatch)", entry.name));
+    }
+    Ok(())
+}
+
+/// Check that an original's bytes are the photo its storage key names: originals are stored
+/// under their content hash, and a restore that kept bytes under another photo's hash would
+/// give that photo's catalog record a different image (the zip checksum can't tell).
+pub fn verify_original(entry: &ZipEntry, hash: &str, data: &[u8]) -> Result<(), String> {
+    if crate::store::content_hash(data) != hash {
+        return Err(format!("{}: the file doesn't match its content hash (damaged or altered backup)", entry.name));
     }
     Ok(())
 }
@@ -284,6 +326,27 @@ mod tests {
     }
 
     #[test]
+    fn originals_must_match_their_content_hash() {
+        let red: &[u8] = b"red corner photo";
+        let blue: &[u8] = b"blue corner photo";
+        let hash = crate::store::content_hash(red);
+        let name = original_entry(&hash, "IMG 1.png");
+        let key = restore_key(&name, "d").unwrap();
+        let key_hash = key.strip_prefix("originals/").unwrap();
+        assert_eq!(key_hash, hash);
+        // the entry's own bytes pass; other bytes under the same name (valid zip CRC) don't
+        let zip = build(&[(name.as_str(), blue)]);
+        let tail = &zip[zip.len() - tail_len(zip.len() as u64) as usize..];
+        let (off, size) = find_central(tail).unwrap();
+        let entries = parse_central(&zip[off as usize..(off + size) as usize]).unwrap();
+        let entry = &entries[0];
+        verify(entry, blue).unwrap();
+        let err = verify_original(entry, key_hash, blue).unwrap_err();
+        assert!(err.contains(&name), "{err}");
+        verify_original(entry, key_hash, red).unwrap();
+    }
+
+    #[test]
     fn restore_keys_are_safe() {
         assert_eq!(restore_key("library/catalog.snap", "library-restored-1").as_deref(), Some("library-restored-1/catalog.snap"));
         assert_eq!(restore_key("library/../../x", "library-r"), None);
@@ -296,6 +359,23 @@ mod tests {
         assert_eq!(original_entry("abc", ".."), "originals/abc/original");
         assert!(valid_library_dir("library") && valid_library_dir("library-restored-17"));
         assert!(!valid_library_dir("library-../x") && !valid_library_dir("originals") && !valid_library_dir("library-"));
+    }
+
+    #[test]
+    fn restore_plan_refuses_repeated_and_oversized_entries() {
+        let entry = |name: &str, size: u64| ZipEntry { name: name.into(), crc: 0, size, header: 0, method: 0 };
+        let ok = [entry("README.txt", 10), entry("library/catalog.log", 10), entry("originals/abc123/a.jpg", 100)];
+        let plan = restore_plan(&ok, "d", 200).unwrap();
+        assert_eq!(plan.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["d/catalog.log", "originals/abc123"]);
+        // one stored range named 3 times would be read, checked and written 3 times
+        let twice = [entry("originals/abc123/a.jpg", 100), entry("originals/abc123/b.jpg", 100)];
+        assert!(restore_plan(&twice, "d", 1000).unwrap_err().contains("twice"));
+        let twice = [entry("library/catalog.log", 10), entry("library/catalog.log", 10)];
+        assert!(restore_plan(&twice, "d", 1000).is_err());
+        // entries claiming more bytes than the file has
+        let big = [entry("library/catalog.log", 150), entry("originals/abc123/a.jpg", 100)];
+        assert!(restore_plan(&big, "d", 200).is_err());
+        assert!(restore_plan(&[entry("library/catalog.log", u64::MAX), entry("library/presets.json", 1)], "d", u64::MAX).is_err());
     }
 
     #[test]

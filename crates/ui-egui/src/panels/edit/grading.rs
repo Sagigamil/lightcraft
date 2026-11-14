@@ -1,17 +1,8 @@
-//! Colour grading (ported from upstream): the 3-Way / Shadows / Midtones / Highlights tabs, the
-//! wheels (hue by angle, saturation by distance), each wheel's eye that hides its effect for
-//! viewing only, and Blending / Balance. Adapted to this tree's egui 0.36 and panel APIs.
-
-use egui::epaint::{Mesh, Vertex};
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
-use lightcraft_catalog::PhotoId;
-use lightcraft_develop::DevelopSettings;
-use serde_json::json;
-
-use super::control;
-use crate::LightcraftApp;
-use crate::icons::{Icon, paint};
-use crate::theme::Tokens;
+use super::sliders::control;
+use super::{
+    Align2, Color32, DevelopSettings, Icon, LightcraftApp, Mesh, PhotoId, Pos2, Rect, Sense, Stroke, Tokens, Vertex, json, paint, pos2, register,
+    vec2,
+};
 
 // ------------------------------------------------------------------------------ colour grading
 
@@ -88,11 +79,12 @@ fn grading_wheel(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings
     // the corners (eye, readout) count as the wheel for hovering
     let zone = r.expand(10.0);
     let hovering = ui.rect_contains_pointer(zone);
-    let resp = ui.interact(r, egui::Id::new(("wheel", key)), Sense::click_and_drag());
+    let resp = ui.interact(r, egui::Id::unique(("wheel", key)), Sense::click_and_drag());
+    crate::widgets::announce(&resp, format!("{} {key}", crate::i18n::tr("Color wheel")));
     let resp = resp.on_hover_text(crate::i18n::tr(
         "Drag to set hue and saturation. Hold Shift to keep the hue, Cmd/Ctrl to keep the saturation, Alt/Option to fine-adjust. Double-click to reset.",
     ));
-    crate::widgets::register(ui.ctx(), format!("wheel:{key}"), r);
+    register(ui, format!("wheel:{key}"), r);
     paint_wheel(ui.painter(), c, rad);
     if hidden {
         ui.painter().circle_filled(c, rad, Color32::from_black_alpha(150));
@@ -111,23 +103,23 @@ fn grading_wheel(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings
     // Modifiers (as in Lightroom): Shift keeps the hue, Cmd/Ctrl keeps the saturation, Alt moves
     // the puck a tenth as far as the pointer. Pressing or releasing one mid-drag re-grabs the
     // puck as it is at that moment.
-    let grab_id = egui::Id::new(("wheelGrab", key));
+    let grab_id = egui::Id::unique(("wheelGrab", key));
     let mods = ui.input(|i| WheelMods::from_modifiers(i.modifiers));
     let pointer = wheel_pointer(ui, &resp);
     let grab = match pointer {
         Some(q) if resp.dragged() || resp.clicked() => {
-            let held = ui.ctx().data(|m| m.get_temp::<WheelGrab>(grab_id)).filter(|g| g.mods == mods && !resp.drag_started());
+            let held = ui.data(|m| m.get_temp::<WheelGrab>(grab_id)).filter(|g| g.mods == mods && !resp.drag_started());
             Some(held.unwrap_or_else(|| {
                 // a fine drag counts the pointer's travel from the press, not from the frame
                 // egui first called it a drag
                 let origin = if resp.drag_started() { ui.input(|i| i.pointer.press_origin()).unwrap_or(q) } else { q };
                 let g = WheelGrab::new(mods, wh.hue as f32, wh.sat as f32, origin - c, rad);
-                ui.ctx().data_mut(|m| m.insert_temp(grab_id, g));
+                ui.data_mut(|m| m.insert_temp(grab_id, g));
                 g
             }))
         }
         _ => {
-            ui.ctx().data_mut(|m| m.remove::<WheelGrab>(grab_id));
+            ui.data_mut(|m| m.remove::<WheelGrab>(grab_id));
             None
         }
     };
@@ -144,7 +136,7 @@ fn grading_wheel(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings
         }
         None => {}
     }
-    // the neutral centre, under the point
+    // the neutral centre (issue #559), under the point
     ui.painter().circle_filled(c, 2.0, Color32::WHITE);
     ui.painter().circle_filled(dot, 5.0, if hidden { Color32::from_gray(150) } else { Color32::WHITE });
     ui.painter().circle_stroke(dot, 5.0, Stroke::new(1.0, Color32::BLACK));
@@ -163,7 +155,7 @@ fn grading_wheel(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings
     }
     // released, or Esc (egui ends a drag on it)
     if resp.drag_stopped()
-        && let Some(held) = ui.ctx().data_mut(|m| m.remove_temp::<WheelCapture>(egui::Id::new(WHEEL_CAPTURE)))
+        && let Some(held) = ui.ctx().data_mut(|m| m.remove_temp::<WheelCapture>(egui::Id::unique(WHEEL_CAPTURE)))
         && !held.dropped
     {
         give_pointer_back(ui.ctx(), held.origin);
@@ -185,8 +177,9 @@ fn grading_wheel(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings
     // the eye: on top of the wheel, shown while hovering or while the wheel is hidden
     if hovering || hidden {
         let eye = Rect::from_center_size(r.left_bottom() + vec2(2.0, -2.0), vec2(16.0, 16.0));
-        let er = ui.interact(eye, egui::Id::new(("wheelEye", key)), Sense::click());
-        crate::widgets::register(ui.ctx(), format!("wheelEye:{key}"), eye);
+        let er = ui.interact(eye, egui::Id::unique(("wheelEye", key)), Sense::click());
+        crate::widgets::announce(&er, crate::i18n::tr("Show / hide"));
+        register(ui, format!("wheelEye:{key}"), eye);
         paint(ui.painter(), eye, if hidden { Icon::EyeOff } else { Icon::Eye }, if hidden { t.text_disabled } else { t.icon });
         let er = er.on_hover_text(crate::i18n::tr(if hidden { "Show this wheel's effect" } else { "Hide this wheel's effect" }));
         if er.clicked() {
@@ -270,8 +263,11 @@ impl WheelGrab {
     }
 }
 
-/// A wheel drag holds the pointer, as in Lightroom: it is hidden for the drag, the puck follows
-/// the mouse's own travel, and on release the pointer is back where the button went down.
+/// A wheel drag holds the pointer, as in Lightroom (issue #1899): it is hidden for the drag, the
+/// puck follows the mouse's own travel, and on release the pointer is back where the button went
+/// down, so a long (Alt) drag doesn't leave it far from the wheels. On macOS the pointer is locked
+/// in place for the drag; elsewhere it moves unseen and is put back. The browser can't move it
+/// (eframe's web host ignores the command), so there it only shows again where the drag ended.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct WheelCapture {
     /// Where the button went down: the pointer goes back there.
@@ -305,7 +301,7 @@ fn wheel_pointer(ui: &egui::Ui, resp: &egui::Response) -> Option<Pos2> {
         return Some(q);
     }
     let ctx = ui.ctx();
-    let id = egui::Id::new(WHEEL_CAPTURE);
+    let id = egui::Id::unique(WHEEL_CAPTURE);
     let held = ctx.data(|m| m.get_temp::<WheelCapture>(id)).filter(|_| !resp.drag_started());
     let mut cap = held.unwrap_or_else(|| {
         if cfg!(target_os = "macos") {
@@ -348,7 +344,7 @@ fn give_pointer_back(ctx: &egui::Context, origin: Pos2) {
 /// and is given back if no wheel drew this pass (the flyout closed or the view changed under the
 /// drag), so it is never left locked or hidden.
 pub(crate) fn wheel_pointer_frame_end(ctx: &egui::Context) {
-    let id = egui::Id::new(WHEEL_CAPTURE);
+    let id = egui::Id::unique(WHEEL_CAPTURE);
     let Some(cap) = ctx.data(|m| m.get_temp::<WheelCapture>(id)) else { return };
     if cap.pass != ctx.cumulative_pass_nr() {
         ctx.data_mut(|m| m.remove::<WheelCapture>(id));
@@ -388,8 +384,8 @@ fn paint_wheel(p: &egui::Painter, c: Pos2, rad: f32) {
 /// The picture of a grading wheel: a hue disc whose rim is fully saturated display sRGB at full
 /// brightness, fading to a neutral grey at the centre. It is built from concentric rings so the
 /// saturation ramps evenly with the radius instead of one fan of triangles blending each hue
-/// straight into grey (which made the whole disc look muddy). Only the drawing: what a position
-/// means for the edit is [`wheel_pick`].
+/// straight into grey (which made the whole disc look muddy, issue #77). Only the drawing:
+/// what a position means for the edit is [`wheel_pick`].
 pub(crate) fn wheel_mesh(c: Pos2, rad: f32) -> Mesh {
     const SEGMENTS: u32 = 72;
     const RINGS: u32 = 12;

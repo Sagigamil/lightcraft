@@ -11,9 +11,9 @@ pub fn configure(session: &mut Session, read: ByteReader, names: Names) {
     // Bound simultaneous decode/probe allocations independently of Rayon's thread count.
     let gate = Arc::new(Mutex::new(()));
     let (reader, serial) = (read.clone(), gate.clone());
-    session.media.file_loader = Some(Arc::new(move |uri, edge| {
+    session.media.file_loader = Some(Arc::new(move |uri, edge, with| {
         let _lease = serial.lock().map_err(|_| "Source decoder lock failed")?;
-        lightcraft_engine::files::load_vec(reader(uri)?, edge)
+        lightcraft_engine::files::load_vec(reader(uri)?, edge, with)
     }));
     let (reader, serial) = (read.clone(), gate.clone());
     session.media.file_probe = Some(Arc::new(move |uri| {

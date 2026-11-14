@@ -18,6 +18,44 @@ use serde_json::{Map, Value, json};
 /// Properties keyed `prefix:name` (as produced by [`lightcraft_meta::parse_xmp`]).
 pub type Props = BTreeMap<String, Vec<String>>;
 
+/// What the mapped settings will develop. It decides how a `crs:` white balance is read: a raw
+/// with a Kelvin scale (colour matrices in the file, or measured for its camera) takes `Temperature`
+/// as Kelvin; everything developed relative to its as-shot look (rendered files, and raws without
+/// matrices anywhere, [`lightcraft_catalog::relative_wb_camera`]) needs a shift from the other app's
+/// as-shot white instead, because on that scale 6500 K / 0 means *as shot* (issue #510).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A preset: raw or rendered unknown. Absolute Kelvin first, else the relative scale.
+    Any,
+    /// A rendered photo (or a raw shown from its embedded preview): `Incremental*` fields on our
+    /// relative scale.
+    Rendered,
+    /// A raw developed with an absolute white balance (DNG and other files with matrices, and raws
+    /// whose camera has measured matrices): Kelvin as written.
+    RawAbsolute,
+    /// A raw developed relative to its as-shot look ([`lightcraft_catalog::Photo::relative_wb`]).
+    RawRelative,
+}
+
+impl Target {
+    /// The target for a file of this media kind and format (its extension or Lightroom's
+    /// `fileFormat` name) shot on `camera` (Exif make and model as the catalog keeps them, or
+    /// empty when unknown); `preview_only` for a raw that can't be decoded yet.
+    pub fn for_file(kind: lightcraft_catalog::MediaKind, format: &str, preview_only: bool, camera: &str) -> Target {
+        if kind != lightcraft_catalog::MediaKind::Raw || preview_only {
+            Target::Rendered
+        } else if lightcraft_catalog::relative_wb_camera(format, camera) {
+            Target::RawRelative
+        } else {
+            Target::RawAbsolute
+        }
+    }
+    /// The target for a photo in the catalog.
+    pub fn for_photo(p: &lightcraft_catalog::Photo) -> Target {
+        Target::for_file(p.kind, &p.format, p.preview_only.is_some(), &p.meta.camera)
+    }
+}
+
 /// Band names as they appear in `crs:` field names, in our mixer order.
 const CRS_BANDS: [&str; 8] = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"];
 
@@ -44,6 +82,28 @@ const NON_ADJUSTMENT: &[&str] = &[
     "crs:AlreadyApplied",
     "crs:RawFileName",
     "crs:HasCrop",
+    // preset/library bookkeeping and tool options that don't change the rendering
+    "crs:Cluster",
+    "crs:SupportsAmount2",
+    "crs:RequiresRGBTables",
+    "crs:SortName",
+    "crs:Description",
+    "crs:CropConstrainToWarp",
+    "crs:OverrideLookVignette",
+    // the file's as-shot white, recorded next to the edit (ours comes from the file itself)
+    "crs:AsShotTemperature",
+    "crs:AsShotTint",
+    // which Lightroom version may read the edit, and checksums of the profiles it names
+    "crs:CompatibleVersion",
+    "crs:CameraProfileDigest",
+    "crs:LensProfileDigest",
+    // the lens profile Lightroom picked: ours is the file's own, only `LensProfileEnable` carries over
+    "crs:LensProfileName",
+    "crs:LensProfileFilename",
+    "crs:LensProfileIsEmbedded",
+    "crs:LensProfileSetup",
+    // a crop tool option (keep the crop inside the photo), not the crop itself
+    "crs:CropConstrainToUnitSquare",
 ];
 
 /// True if the packet carries any `crs:` adjustment (not just bookkeeping fields).
@@ -58,12 +118,22 @@ pub fn has_adjustments(props: &Props) -> bool {
 thread_local! {
     /// Keys read by [`to_partial`] while [`to_partial_report`] runs.
     static READ: std::cell::RefCell<Option<std::collections::BTreeSet<String>>> = const { std::cell::RefCell::new(None) };
+    /// Adjustments [`to_partial`] read but deliberately left out, for the report.
+    static SKIPPED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn note(k: &str) {
     READ.with(|r| {
         if let Some(s) = r.borrow_mut().as_mut() {
             s.insert(k.to_string());
+        }
+    });
+}
+
+fn skipped(what: &str) {
+    SKIPPED.with(|r| {
+        if let Some(s) = r.borrow_mut().as_mut() {
+            s.push(what.to_string());
         }
     });
 }
@@ -114,7 +184,8 @@ fn curve(props: &Props, k: &str) -> Option<Value> {
     let mut pts = Vec::new();
     for it in items {
         let (x, y) = it.split_once(',')?;
-        let (x, y) = (x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?);
+        // (`parse` reads "NaN" and "inf" too: a curve with such a point is not a curve)
+        let (x, y) = (x.trim().parse::<f64>().ok().filter(|v| v.is_finite())?, y.trim().parse::<f64>().ok().filter(|v| v.is_finite())?);
         pts.push(json!({"x": (x / 255.0).clamp(0.0, 1.0), "y": (y / 255.0).clamp(0.0, 1.0)}));
     }
     if pts.len() < 2 {
@@ -127,10 +198,8 @@ fn curve(props: &Props, k: &str) -> Option<Value> {
 
 /// Map the `crs:` fields of an XMP packet to a partial develop-settings JSON object.
 ///
-/// `raw`: the target is a raw file (absolute Kelvin white balance) — `Some(false)` prefers the
-/// relative `Incremental*` white balance used for rendered files, `None` (presets) takes whichever
-/// is present, absolute first.
-pub fn to_partial(props: &Props, raw: Option<bool>) -> Value {
+/// `target` decides how the white balance is read (see [`Target`]).
+pub fn to_partial(props: &Props, target: Target) -> Value {
     let mut out = Value::Object(Map::new());
     let o = &mut out;
     let n = |o: &mut Value, crs: &str, path: &str| {
@@ -145,6 +214,10 @@ pub fn to_partial(props: &Props, raw: Option<bool>) -> Value {
     n(o, "Shadows2012", "light.shadows");
     n(o, "Whites2012", "light.whites");
     n(o, "Blacks2012", "light.blacks");
+    // Lightroom's Light panel "HDR" button
+    if let Some(on) = boolean(props, "crs:HDREditMode") {
+        put(o, "hdr.enabled", json!(on));
+    }
     // older process versions (most `.lrtemplate` presets): approximate the 2012 sliders from the
     // earlier ones, relative to their defaults (contrast 25, blacks 5, brightness 50)
     let has = |o: &Value, path: &str| path.split('.').try_fold(o, |v, k| v.get(k)).is_some();
@@ -189,10 +262,24 @@ pub fn to_partial(props: &Props, raw: Option<bool>) -> Value {
     let rel = num(props, "crs:IncrementalTemperature")
         .or(num(props, "crs:IncrementalTint").map(|_| 0.0))
         .map(|t| (rel_to_kelvin(t), num(props, "crs:IncrementalTint")));
-    let wb = match raw {
-        Some(true) => abs,
-        Some(false) => rel.or(abs),
-        None => abs.or(rel),
+    // A Kelvin value for something we develop relative to its as-shot look: the other app's
+    // as-shot white (`AsShotTemperature` / `AsShotTint`, written next to the edit) is the
+    // reference, so the edit is the same mired shift from ours (issue #510).
+    let shifted = || {
+        let (t, tint) = abs?;
+        let as_shot = num(props, "crs:AsShotTemperature").filter(|k| *k > 0.0)?;
+        if t <= 0.0 {
+            return None;
+        }
+        let r = (1e6 / as_shot - 1e6 / t) / 0.8;
+        let tint = tint.map(|v| v - num(props, "crs:AsShotTint").unwrap_or(0.0));
+        Some((rel_to_kelvin(r), tint))
+    };
+    let wb = match target {
+        Target::RawAbsolute => abs,
+        Target::Any => abs.or(rel),
+        Target::Rendered => rel.or_else(shifted).or(abs),
+        Target::RawRelative => rel.or_else(shifted),
     };
     match (mode, wb) {
         (Some(m), _) if m != "custom" => put(o, "wb.mode", json!(m)),
@@ -202,6 +289,18 @@ pub fn to_partial(props: &Props, raw: Option<bool>) -> Value {
             if let Some(tint) = tint {
                 put(o, "wb.tint", json!(tint));
             }
+            // Kelvin as the other app wrote it: say so, so the value stays Kelvin on a raw with that scale (a
+            // preset's Kelvin is read as the relative scale on the files that have only that, as before)
+            if wb == abs && matches!(target, Target::RawAbsolute | Target::Any) {
+                put(o, "wb.scale", json!("kelvin"));
+            }
+        }
+        // a custom Kelvin with nothing to shift it from: read on the relative scale it would be a
+        // large colour shift (ΔE 22 against Lightroom's export on the photos of issue #510), so
+        // the photo stays As Shot (ΔE 12 there) and the report says so
+        (_, None) if target == Target::RawRelative && abs.is_some() => {
+            put(o, "wb.mode", json!("asShot"));
+            skipped("Temperature, Tint (custom white balance without AsShotTemperature: kept As Shot)");
         }
         (Some(m), None) => put(o, "wb.mode", json!(m)),
         (None, None) => {}
@@ -233,11 +332,20 @@ pub fn to_partial(props: &Props, raw: Option<bool>) -> Value {
             put(o, "curve.master", c);
         }
     }
-    for (crs, ch) in
-        [("ToneCurvePV2012", "master"), ("ToneCurvePV2012Red", "red"), ("ToneCurvePV2012Green", "green"), ("ToneCurvePV2012Blue", "blue")]
-    {
-        if let Some(c) = curve(props, &format!("crs:{crs}")) {
-            put(o, &format!("curve.{ch}"), c);
+    // Lightroom Classic reads the red / green / blue curves only when the packet holds the master
+    // 2012 curve and all three channel curves (as its own packets always do): a packet missing any
+    // of them imports without channel curves (master + red, master + red + green, or red / green /
+    // blue without the master all leave the photo's channels unchanged there)
+    if let Some(c) = curve(props, "crs:ToneCurvePV2012") {
+        put(o, "curve.master", c);
+        let channels = [("ToneCurvePV2012Red", "red"), ("ToneCurvePV2012Green", "green"), ("ToneCurvePV2012Blue", "blue")]
+            .map(|(crs, ch)| (curve(props, &format!("crs:{crs}")), ch));
+        if channels.iter().all(|(c, _)| c.is_some()) {
+            for (c, ch) in channels {
+                if let Some(c) = c {
+                    put(o, &format!("curve.{ch}"), c);
+                }
+            }
         }
     }
 
@@ -287,9 +395,12 @@ pub fn to_partial(props: &Props, raw: Option<bool>) -> Value {
     n(o, "GrainSize", "grain.size");
     n(o, "GrainFrequency", "grain.roughness");
 
-    // ---- Optics (manual corrections; lens profiles are ours, only the switch carries over)
-    if let Some(b) = boolean(props, "crs:LensProfileEnable") {
-        put(o, "optics.lens_profile", json!(b));
+    // ---- Optics (manual corrections; lens profiles are ours, only the switch carries over).
+    // Our profile corrections are the file's own (DNG-embedded) ones, which Lightroom applies
+    // whatever its "Enable Profile Corrections" box says [inferred]: so only an enabling switch
+    // carries over, and `LensProfileEnable=0` (the default in most presets) leaves ours as it is.
+    if boolean(props, "crs:LensProfileEnable") == Some(true) {
+        put(o, "optics.lens_profile", json!(true));
     }
     if let Some(b) = boolean(props, "crs:AutoLateralCA") {
         put(o, "optics.remove_ca", json!(b));
@@ -358,11 +469,12 @@ pub fn to_partial(props: &Props, raw: Option<bool>) -> Value {
 /// With `values` (the packet's structured properties), local corrections become masks too
 /// ([`crate::crs_masks`]; radial masks fitted to `aspect` = width / height); components that
 /// can't be carried over are reported as `Mask: <kind>`.
-pub fn to_partial_report(props: &Props, values: Option<&crate::crs_masks::Values>, raw: Option<bool>, aspect: f64) -> (Value, Vec<String>) {
+pub fn to_partial_report(props: &Props, values: Option<&crate::crs_masks::Values>, target: Target, aspect: f64) -> (Value, Vec<String>) {
     READ.with(|r| *r.borrow_mut() = Some(Default::default()));
-    let mut out = to_partial(props, raw);
+    SKIPPED.with(|r| *r.borrow_mut() = Some(Vec::new()));
+    let mut out = to_partial(props, target);
     let mut read = READ.with(|r| r.borrow_mut().take()).unwrap_or_default();
-    let mut mask_skips = Vec::new();
+    let mut mask_skips = SKIPPED.with(|r| r.borrow_mut().take()).unwrap_or_default();
     if let Some(values) = values {
         let (masks, skipped) = crate::crs_masks::masks(values, aspect);
         if !masks.is_empty() {
@@ -370,11 +482,30 @@ pub fn to_partial_report(props: &Props, values: Option<&crate::crs_masks::Values
         }
         if values.keys().any(|k| crate::crs_masks::CONTAINERS.contains(&k.as_str())) {
             read.extend(crate::crs_masks::CONTAINERS.iter().map(|c| c.to_string()));
-            mask_skips = skipped.into_iter().map(|k| format!("Mask: {k}")).collect();
+            mask_skips.extend(skipped.into_iter().map(|k| format!("Mask: {k}")));
+        }
+        let (spots, skipped) = crate::crs_masks::spots(values, aspect);
+        if !spots.is_empty() {
+            put(&mut out, "spots", Value::Array(spots));
+        }
+        if values.keys().any(|k| crate::crs_masks::SPOT_CONTAINERS.contains(&k.as_str())) {
+            read.extend(crate::crs_masks::SPOT_CONTAINERS.iter().map(|c| c.to_string()));
+            mask_skips.extend(skipped.into_iter().map(|k| format!("Spot: {k}")));
         }
     }
-    // fields that only switch a panel on/off or name things: not adjustments by themselves
-    let quiet = |k: &str| k.starts_with("Enable") || k.starts_with("ToneCurveName") || k == "AutoTone" || k == "AutoGrayscaleMix";
+    // fields that only switch a panel on/off or name things: not adjustments by themselves; and
+    // Point Color slots that are all empty (-1)
+    let value_is = |k: &str, f: &dyn Fn(&[String]) -> bool| props.get(&format!("crs:{k}")).is_some_and(|v| f(v));
+    let empty_points = |v: &[String]| v.iter().all(|s| s.split(',').all(|n| n.trim().parse::<f64>().is_ok_and(|x| x == -1.0) || n.trim().is_empty()));
+    let quiet = |k: &str| {
+        k.starts_with("Enable")
+            || k.starts_with("ToneCurveName")
+            || k == "AutoTone"
+            || k == "AutoGrayscaleMix"
+            || (k == "PointColors" && value_is(k, &empty_points))
+            // the lens profile's strength, written at its default (100 %) next to every profile
+            || (matches!(k, "LensProfileDistortionScale" | "LensProfileVignettingScale") && value_is(k, &|v| v.iter().all(|s| s.trim() == "100")))
+    };
     let mut unmapped: Vec<String> = props
         .keys()
         .filter(|k| k.starts_with("crs:"))
@@ -388,12 +519,28 @@ pub fn to_partial_report(props: &Props, values: Option<&crate::crs_masks::Values
     (out, unmapped)
 }
 
+/// The selected camera profile name from an XMP packet. The name is metadata only: it does not
+/// identify or carry the profile's rendering data.
+pub fn camera_profile_name(props: &Props) -> Option<&str> {
+    first(props, "crs:CameraProfile")
+}
+
+/// Whether an XMP packet contains a saved Lightroom Upright matrix. Lightroom's matrix uses a
+/// coordinate convention that LightCraft does not currently import.
+pub fn has_saved_upright_transform(props: &Props) -> bool {
+    props.keys().any(|key| {
+        key.strip_prefix("crs:").is_some_and(|name| {
+            name.starts_with("UprightTransform_") && props.get(key).is_some_and(|values| values.iter().any(|v| !v.trim().is_empty()))
+        })
+    })
+}
+
 /// Read an XMP preset (`crs:` fields + `crs:Name` / `crs:Group`) into one of our presets.
 /// Returns `None` when the packet has no adjustments we understand.
 pub fn preset_from_xmp(xmp: &str, fallback_name: &str) -> Option<Preset> {
     let d = lightcraft_meta::parse_xmp(xmp).ok()?;
     let props = &d.properties;
-    let settings = to_partial(props, None);
+    let settings = to_partial(props, Target::Any);
     if settings.as_object().is_none_or(Map::is_empty) {
         return None;
     }
@@ -405,138 +552,4 @@ pub fn preset_from_xmp(xmp: &str, fallback_name: &str) -> Option<Preset> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use lightcraft_develop::{DevelopSettings, Upright, VignetteStyle, WbMode, apply_partial};
-
-    /// A hand-written sidecar in attribute form (as many tools write it).
-    const SIDECAR: &str = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
- <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-  <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
-    crs:Version="99.0" crs:ProcessVersion="11.0" crs:WhiteBalance="Custom" crs:Temperature="5150" crs:Tint="+12"
-    crs:Exposure2012="+0.65" crs:Contrast2012="-14" crs:Highlights2012="-58" crs:Shadows2012="+41"
-    crs:Whites2012="+9" crs:Blacks2012="-17" crs:Texture="+6" crs:Clarity2012="+11" crs:Dehaze="+4"
-    crs:Vibrance="+19" crs:Saturation="-3" crs:HueAdjustmentOrange="-7" crs:SaturationAdjustmentBlue="-22"
-    crs:LuminanceAdjustmentAqua="+13" crs:ParametricShadows="+5" crs:ParametricHighlights="-8"
-    crs:ParametricMidtoneSplit="55" crs:CurveRefineSaturation="40" crs:SplitToningShadowHue="210" crs:SplitToningShadowSaturation="14"
-    crs:SplitToningHighlightHue="40" crs:SplitToningHighlightSaturation="9" crs:SplitToningBalance="+20"
-    crs:ColorGradeMidtoneHue="120" crs:ColorGradeMidtoneSat="6" crs:ColorGradeBlending="70"
-    crs:Sharpness="55" crs:SharpenRadius="+1.2" crs:SharpenDetail="30" crs:SharpenEdgeMasking="12"
-    crs:LuminanceSmoothing="18" crs:ColorNoiseReduction="25" crs:PostCropVignetteAmount="-21"
-    crs:PostCropVignetteStyle="2" crs:GrainAmount="15" crs:GrainSize="30" crs:GrainFrequency="60"
-    crs:PerspectiveUpright="2" crs:PerspectiveVertical="-10" crs:AutoLateralCA="1" crs:ConvertToGrayscale="False"
-    crs:ShadowTint="-7" crs:RedHue="+12" crs:RedSaturation="+20" crs:GreenHue="-5" crs:GreenSaturation="+3"
-    crs:BlueHue="-15" crs:BlueSaturation="+25"
-    crs:HasCrop="True" crs:CropTop="0.1" crs:CropLeft="0.05" crs:CropBottom="0.9" crs:CropRight="0.8" crs:CropAngle="1.5">
-   <crs:ToneCurvePV2012>
-    <rdf:Seq><rdf:li>0, 0</rdf:li><rdf:li>64, 52</rdf:li><rdf:li>192, 205</rdf:li><rdf:li>255, 255</rdf:li></rdf:Seq>
-   </crs:ToneCurvePV2012>
-   <crs:ToneCurvePV2012Red>
-    <rdf:Seq><rdf:li>0, 0</rdf:li><rdf:li>255, 255</rdf:li></rdf:Seq>
-   </crs:ToneCurvePV2012Red>
-  </rdf:Description>
- </rdf:RDF>
-</x:xmpmeta>"#;
-
-    fn props(x: &str) -> Props {
-        lightcraft_meta::parse_xmp(x).unwrap().properties
-    }
-
-    #[test]
-    fn maps_common_fields() {
-        let p = props(SIDECAR);
-        assert!(has_adjustments(&p));
-        let partial = to_partial(&p, Some(true));
-        let s = apply_partial(&DevelopSettings::for_raw(5000.0, 0.0), &partial, 1.0);
-        assert_eq!(s.wb.mode, WbMode::Custom);
-        assert_eq!((s.wb.temp, s.wb.tint), (5150.0, 12.0));
-        assert_eq!(s.light.exposure, 0.65);
-        assert_eq!((s.light.contrast, s.light.highlights, s.light.shadows, s.light.whites, s.light.blacks), (-14.0, -58.0, 41.0, 9.0, -17.0));
-        assert_eq!((s.effects.texture, s.effects.clarity, s.effects.dehaze), (6.0, 11.0, 4.0));
-        assert_eq!((s.color.vibrance, s.color.saturation), (19.0, -3.0));
-        assert_eq!(s.mixer.orange.hue, -7.0);
-        assert_eq!(s.mixer.blue.sat, -22.0);
-        assert_eq!(s.mixer.aqua.lum, 13.0);
-        assert_eq!((s.curve.shadows, s.curve.highlights, s.curve.split_mid), (5.0, -8.0, 55.0));
-        assert_eq!(s.curve.master.len(), 4);
-        assert_eq!(s.curve.refine_saturation, 40.0);
-        assert!((s.curve.master[1].x - 64.0 / 255.0).abs() < 1e-9 && (s.curve.master[1].y - 52.0 / 255.0).abs() < 1e-9);
-        assert!(s.curve.red.is_empty(), "identity channel curve maps to no curve");
-        assert_eq!((s.grading.shadows.hue, s.grading.shadows.sat), (210.0, 14.0));
-        assert_eq!((s.grading.highlights.hue, s.grading.highlights.sat), (40.0, 9.0));
-        assert_eq!((s.grading.midtones.hue, s.grading.midtones.sat), (120.0, 6.0));
-        assert_eq!((s.grading.balance, s.grading.blending), (20.0, 70.0));
-        assert_eq!((s.detail.sharpen_amount, s.detail.sharpen_radius, s.detail.sharpen_detail, s.detail.sharpen_masking), (55.0, 1.2, 30.0, 12.0));
-        assert_eq!((s.detail.nr_luminance, s.detail.nr_color), (18.0, 25.0));
-        assert_eq!(s.vignette.amount, -21.0);
-        assert_eq!(s.vignette.style, VignetteStyle::ColorPriority);
-        assert_eq!((s.grain.amount, s.grain.size, s.grain.roughness), (15.0, 30.0, 60.0));
-        assert_eq!(s.geometry.upright, Upright::Level);
-        assert_eq!(s.geometry.vertical, -10.0);
-        assert!(s.optics.remove_ca);
-        assert_eq!(s.treatment, lightcraft_develop::Treatment::Color);
-        let cal = s.calibration;
-        assert_eq!(
-            (cal.shadows_tint, cal.red_hue, cal.red_sat, cal.green_hue, cal.green_sat, cal.blue_hue, cal.blue_sat),
-            (-7.0, 12.0, 20.0, -5.0, 3.0, -15.0, 25.0)
-        );
-        let c = s.crop.geometry;
-        assert_eq!((c.rect.x0, c.rect.y0, c.rect.x1, c.rect.y1, c.angle), (0.05, 0.1, 0.8, 0.9, 1.5));
-    }
-
-    #[test]
-    fn only_present_fields_are_in_the_partial() {
-        let x = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description
-            xmlns:c="http://ns.adobe.com/camera-raw-settings/1.0/" c:Vibrance="+30" c:GrainAmount="10"/></rdf:RDF>"#;
-        let partial = to_partial(&props(x), None);
-        assert_eq!(partial, json!({"color": {"vibrance": 30.0}, "grain": {"amount": 10.0}}));
-    }
-
-    #[test]
-    fn element_form_bw_and_incremental_wb() {
-        let x = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-          <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">
-            <crs:ConvertToGrayscale>True</crs:ConvertToGrayscale>
-            <crs:GrayMixerBlue>-35</crs:GrayMixerBlue>
-            <crs:IncrementalTemperature>25</crs:IncrementalTemperature>
-            <crs:IncrementalTint>-6</crs:IncrementalTint>
-            <crs:Temperature>4800</crs:Temperature>
-          </rdf:Description></rdf:RDF></x:xmpmeta>"#;
-        let p = props(x);
-        let rendered = apply_partial(&DevelopSettings::default(), &to_partial(&p, Some(false)), 1.0);
-        assert_eq!(rendered.treatment, lightcraft_develop::Treatment::Bw);
-        assert_eq!(rendered.bw_mix.blue, -35.0);
-        assert!((rendered.wb.temp - rel_to_kelvin(25.0)).abs() < 1e-6 && rendered.wb.temp > 6500.0);
-        assert_eq!(rendered.wb.tint, -6.0);
-        let raw = apply_partial(&DevelopSettings::default(), &to_partial(&p, Some(true)), 1.0);
-        assert_eq!(raw.wb.temp, 4800.0);
-    }
-
-    #[test]
-    fn named_wb_and_already_applied() {
-        let x = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
-             crs:WhiteBalance="Daylight" crs:Temperature="5500" crs:Tint="10" crs:AlreadyApplied="True"/>"#;
-        let p = props(x);
-        assert_eq!(to_partial(&p, Some(true)), json!({"wb": {"mode": "daylight"}}));
-        assert!(!has_adjustments(&p));
-        let bookkeeping = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-             xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:Version="1" crs:HasSettings="True"/>"#;
-        assert!(!has_adjustments(&props(bookkeeping)));
-    }
-
-    #[test]
-    fn xmp_preset_with_name_and_group() {
-        // Written for this test: a minimal preset-shaped packet with localized name/group.
-        let x = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-          <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
-             crs:PresetType="Normal" crs:UUID="0123ABCD" crs:Contrast2012="+25" crs:SupportsAmount="True">
-            <crs:Name><rdf:Alt><rdf:li xml:lang="x-default">Punchy Test</rdf:li></rdf:Alt></crs:Name>
-            <crs:Group><rdf:Alt><rdf:li xml:lang="x-default">My Looks</rdf:li></rdf:Alt></crs:Group>
-          </rdf:Description></rdf:RDF></x:xmpmeta>"#;
-        let p = preset_from_xmp(x, "file").unwrap();
-        assert_eq!((p.name.as_str(), p.group.as_str(), p.id.as_str()), ("Punchy Test", "My Looks", "user.xmp.0123abcd"));
-        assert_eq!(p.settings, json!({"light": {"contrast": 25.0}}));
-        assert!(!p.builtin);
-        assert!(preset_from_xmp("<x/>", "f").is_none());
-    }
-}
+mod tests;
