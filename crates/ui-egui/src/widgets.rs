@@ -343,7 +343,10 @@ pub fn nudged(spec: &ControlSpec, value: f64, steps: f64) -> f64 {
 }
 
 /// Collapsible section header ("› Light"). Returns the response (click toggles).
-pub fn section_header(ui: &mut Ui, id: &str, title: &str, open: bool, enabled: Option<bool>) -> (Response, Option<bool>) {
+///
+/// `touch` is set on a touch screen, where the eye is shown always: there is no hover to reveal
+/// it (on a desktop it stays out of the way until the pointer is on the header).
+pub fn section_header(ui: &mut Ui, id: &str, title: &str, open: bool, enabled: Option<bool>, touch: bool) -> (Response, Option<bool>) {
     let title = crate::i18n::tr(title);
     let t = Tokens::get(ui.ctx());
     let w = ui.available_width();
@@ -360,13 +363,16 @@ pub fn section_header(ui: &mut Ui, id: &str, title: &str, open: bool, enabled: O
     let mut toggled = None;
     // shown while the pointer is anywhere on the header: `resp.hovered()` turns false as soon as the
     // pointer is over the eye itself (the eye is on top), which hid the eye before it could be
-    // clicked (issue #316)
+    // clicked (issue #316). On a touch screen there is no hover at all, so the eye is always shown.
     if let Some(on) = enabled
-        && (ui.rect_contains_pointer(r) || !on)
+        && (touch || ui.rect_contains_pointer(r) || !on)
     {
         let eye = Rect::from_center_size(pos2(r.right() - 34.0, r.center().y), vec2(18.0, 18.0));
-        let er = ui.interact(eye, ui.id().with(("eye", id)), Sense::click());
-        register(ui.ctx(), format!("sectionEye:{id}"), eye);
+        // a finger needs a larger target than the 18 pt glyph; the header row stays clickable
+        // everywhere else
+        let hit = Rect::from_center_size(eye.center(), vec2(40.0, r.height())).intersect(r);
+        let er = ui.interact(hit, ui.id().with(("eye", id)), Sense::click());
+        register(ui.ctx(), format!("sectionEye:{id}"), hit);
         paint(ui.painter(), eye, Icon::Eye, if on { t.icon } else { t.text_disabled });
         if !on {
             ui.painter().line_segment([eye.left_bottom(), eye.right_top()], Stroke::new(1.5, t.text_disabled));

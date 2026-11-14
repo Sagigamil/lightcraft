@@ -300,6 +300,10 @@ pub struct UiState {
     /// A SAM 3 download was started from the app (to report its end once).
     #[serde(skip)]
     pub sam_downloading: bool,
+    /// The host is a touch screen (Android), so hover-only affordances (the eye on a section
+    /// header) are always shown: a finger cannot hover.
+    #[serde(skip)]
+    pub touch_ui: bool,
     /// The mask an Android single-tap AI selection is filling, until Keep or Cancel.
     #[serde(skip)]
     pub ai_pending_mask: Option<u32>,
@@ -615,6 +619,7 @@ impl Default for UiState {
             describe: None,
             detail_due: None,
             sam_downloading: false,
+            touch_ui: false,
             ai_pending_mask: None,
             ai_add_to_selection: false,
             renaming_component: None,

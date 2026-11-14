@@ -314,6 +314,8 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
         inner.ui.settings.memory_mb = 512;
         inner.ui.settings.preview_edge = 2048;
     }
+    // a tablet cannot hover: show the eye on every Edit section header
+    inner.ui.touch_ui = true;
     let destination = bridge.call(json!({"op":"exportDestination"}))?;
     super::storage::set_export_destination(&mut inner, destination.get("value").and_then(Value::as_str).unwrap_or_default());
     let mut options = eframe::NativeOptions { android_app: Some(android), ..Default::default() };

@@ -1117,6 +1117,23 @@ mod tests {
         assert!(h.app.ui.section_open("light"), "the click didn't fold the section");
     }
 
+    /// A tablet has no hover: on a touch host the eye must be there (and clickable) before the
+    /// pointer has ever been over the header.
+    #[test]
+    fn section_eye_is_always_shown_on_touch() {
+        let mut h = demo([1300.0, 900.0]);
+        let t = Duration::from_secs(10);
+        h.request("ui.set", json!({"view": "detail", "right": "edit"}), t);
+        h.settle(SETTLE);
+        h.app.ui.touch_ui = true;
+        h.settle(SETTLE);
+        let light_on = |h: &Headless| h.app.session.develop_of(h.app.session.active().unwrap()).unwrap().section_enabled("light");
+        assert_eq!(h.request("ui.clickWidget", json!({"id": "sectionEye:light"}), t)["ok"], true);
+        h.settle(SETTLE);
+        assert!(!light_on(&h), "the eye switched Light off without a hover");
+        assert!(h.app.ui.section_open("light"), "the click didn't fold the section");
+    }
+
     /// Return commits a tool panel back to Edit; elsewhere it does nothing.
     #[test]
     fn return_commits_the_crop_tool() {
