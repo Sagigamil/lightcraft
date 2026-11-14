@@ -226,8 +226,13 @@ impl Segmenter {
     /// Whether the local model files are in place.
     pub fn installed(&self) -> bool {
         #[cfg(feature = "sam")]
-        if let Some(dir) = &self.dir {
-            return lightcraft_segment::is_model_dir(dir);
+        {
+            if self.mobile.is_some() {
+                return true;
+            }
+            if let Some(dir) = &self.dir {
+                return lightcraft_segment::is_model_dir(dir);
+            }
         }
         false
     }
