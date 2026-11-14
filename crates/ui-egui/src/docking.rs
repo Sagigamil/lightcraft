@@ -55,7 +55,7 @@ const PRESETS_WIDTH: f32 = 300.0;
 
 /// The arrangement generation saved as `UiState::docking_version`. Settings without it hold the
 /// side panels in split frames; they start again from [`default_workspace`].
-pub const DOCKING_VERSION: u32 = 2;
+pub const DOCKING_VERSION: u32 = 3;
 
 /// Drops saved settings' arrangement from before [`DOCKING_VERSION`], with the places of its
 /// closed panels, so the app starts from the default workspace; every other setting stays.
@@ -260,7 +260,13 @@ fn from_ui(app: &crate::LightcraftApp) -> Workspace {
 fn sync(workspace: &mut Workspace, app: &crate::LightcraftApp) -> Result<(), String> {
     set_visible(workspace, Panel::Library, app.ui.left_panel)?;
     set_visible(workspace, Panel::Tools, app.ui.right != crate::state::RightPanel::None)?;
-    set_visible(workspace, Panel::Presets, app.ui.presets)
+    // On a tablet Presets is a tab in the Tools column, so it costs no width: keep it there
+    // (the saved layout from a wider screen may not hold it, and a published state would hide it).
+    #[cfg(target_os = "android")]
+    let presets = true;
+    #[cfg(not(target_os = "android"))]
+    let presets = app.ui.presets;
+    set_visible(workspace, Panel::Presets, presets)
 }
 
 fn publish_visibility(app: &mut crate::LightcraftApp, workspace: &Workspace) {
