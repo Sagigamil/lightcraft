@@ -1,12 +1,16 @@
 // On-device test driver for the MobileSAM QNN runner.
 
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
 
 extern "C" int mobilesam_run_points(const char* lib_dir, const char* dir, const float* image, size_t image_floats,
                                     const float* points, size_t num_points, const float* labels, float* masks, float* scores,
+                                    long* encoder_ms, long* decoder_ms);
+extern "C" int mobilesam_run_prompt(const char* lib_dir, const char* dir, const float* image, size_t image_floats,
+                                    const float* coords, const float* labels, size_t num_points, float* masks, float* scores,
                                     long* encoder_ms, long* decoder_ms);
 
 static std::vector<float> read_f32(const char* path) {
@@ -29,11 +33,23 @@ static bool write_f32(const std::string& path, const std::vector<float>& v) {
     return static_cast<bool>(f);
 }
 
+static void report(const char* label, const float* mask, float score) {
+    float lo = mask[0], hi = mask[0];
+    size_t positive = 0;
+    for (size_t i = 0; i < 256 * 256; ++i) {
+        lo = mask[i] < lo ? mask[i] : lo;
+        hi = mask[i] > hi ? mask[i] : hi;
+        positive += mask[i] > 0.0f ? 1 : 0;
+    }
+    std::printf("%s score=%.4f mask min=%.4f max=%.4f positive=%zu\n", label, score, lo, hi, positive);
+}
+
 int main(int argc, char** argv) {
     if (argc < 7) {
-        std::fprintf(stderr, "usage: mobilesam_test <libdir> <ctxdir> <image.raw> <points.raw> <labels.raw> <outdir>\n");
+        std::fprintf(stderr, "usage: mobilesam_test <libdir> <ctxdir> <image.raw> <points.raw> <labels.raw> <outdir> [prompt|points]\n");
         return 2;
     }
+    const bool prompt = argc > 7 && std::strcmp(argv[7], "prompt") == 0;
     auto image = read_f32(argv[3]);
     auto points = read_f32(argv[4]);
     auto labels = read_f32(argv[5]);
@@ -42,23 +58,28 @@ int main(int argc, char** argv) {
         return 2;
     }
     const size_t n = labels.size();
-    std::vector<float> masks(n * 256 * 256), scores(n);
     long enc_ms = 0, dec_ms = 0;
-    int rc = mobilesam_run_points(argv[1], argv[2], image.data(), image.size(), points.data(), n, labels.data(), masks.data(),
+    int rc = 0;
+    if (prompt) {
+        std::vector<float> masks(256 * 256), scores(1);
+        rc = mobilesam_run_prompt(argv[1], argv[2], image.data(), image.size(), points.data(), labels.data(), n, masks.data(),
                                   scores.data(), &enc_ms, &dec_ms);
+        std::printf("rc=%d prompt points=%zu encoder_ms=%ld decoder_ms=%ld\n", rc, n, enc_ms, dec_ms);
+        if (rc != 0) return rc;
+        report("prompt", masks.data(), scores[0]);
+        if (!write_f32(std::string(argv[6]) + "/masks.raw", masks)) return 3;
+        if (!write_f32(std::string(argv[6]) + "/scores.raw", scores)) return 3;
+        return 0;
+    }
+    std::vector<float> masks(n * 256 * 256), scores(n);
+    rc = mobilesam_run_points(argv[1], argv[2], image.data(), image.size(), points.data(), n, labels.data(), masks.data(),
+                              scores.data(), &enc_ms, &dec_ms);
     std::printf("rc=%d points=%zu encoder_ms=%ld decoder_total_ms=%ld\n", rc, n, enc_ms, dec_ms);
     if (rc != 0) return rc;
     for (size_t p = 0; p < n; ++p) {
-        const float* m = masks.data() + p * 256 * 256;
-        float lo = m[0], hi = m[0];
-        size_t positive = 0;
-        for (size_t i = 0; i < 256 * 256; ++i) {
-            lo = m[i] < lo ? m[i] : lo;
-            hi = m[i] > hi ? m[i] : hi;
-            positive += m[i] > 0.0f ? 1 : 0;
-        }
-        std::printf("point %zu (%.1f, %.1f) label %.0f: score=%.4f mask min=%.4f max=%.4f positive=%zu\n", p, points[2 * p],
-                    points[2 * p + 1], labels[p], scores[p], lo, hi, positive);
+        char label[64];
+        std::snprintf(label, sizeof(label), "point %zu (%.1f, %.1f) label %.0f", p, points[2 * p], points[2 * p + 1], labels[p]);
+        report(label, masks.data() + p * 256 * 256, scores[p]);
     }
     if (!write_f32(std::string(argv[6]) + "/masks.raw", masks)) return 3;
     if (!write_f32(std::string(argv[6]) + "/scores.raw", scores)) return 3;

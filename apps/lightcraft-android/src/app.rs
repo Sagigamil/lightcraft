@@ -44,56 +44,88 @@ struct App {
     model_error: Arc<std::sync::Mutex<Option<String>>>,
 }
 
-/// SAM 3's vision backbone on the Hexagon NPU (the AI edition's QNN chain).
-///
-/// The Rust worker hands over the preprocessed image; Java extracts the context binaries once
-/// and `libqnn_chain.so` runs stem + two 16-block chunks on the HTP, returning the token
-/// tensor. The neck and decoder stay in the Rust engine, and any failure falls back to the
-/// CPU backbone in the worker.
+/// MobileSAM on the device: the encoder on the Hexagon HTP, the prompt decoder on the QNN CPU
+/// backend. Java extracts the two contexts on first use; Rust writes the image and prompt tensors
+/// and reads the embeddings and mask back. The masking UI and the mask representation are the
+/// same as with SAM 3.
 #[cfg(all(feature = "sam", target_os = "android"))]
-struct NpuEncoder {
+struct MobileSamQnn {
     bridge: Arc<Bridge>,
     dir: std::path::PathBuf,
-    input: std::path::PathBuf,
-    output: std::path::PathBuf,
+    image: std::path::PathBuf,
+    embeddings: std::path::PathBuf,
+    points: std::path::PathBuf,
+    labels: std::path::PathBuf,
+    mask: std::path::PathBuf,
+    score: std::path::PathBuf,
 }
 
 #[cfg(all(feature = "sam", target_os = "android"))]
-impl lightcraft_engine::segment::BackboneEncoder for NpuEncoder {
-    fn encode(&self, pixels: &[f32]) -> std::result::Result<Vec<f32>, String> {
-        const GRID: usize = 72;
-        const HIDDEN: usize = 1024;
-        let n = GRID * GRID * HIDDEN;
-        let fail = |what: &str, e: &dyn std::fmt::Display| format!("Hexagon NPU {what}: {e}");
-        std::fs::create_dir_all(&self.dir).map_err(|e| fail("folder", &e))?;
-        // The Java side reads the raw f32 tensor; Android is little-endian (aarch64).
-        let mut bytes = Vec::with_capacity(pixels.len() * 4);
-        for v in pixels {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        std::fs::write(&self.input, &bytes).map_err(|e| fail("input", &e))?;
-        let reply = self
-            .bridge
-            .call(json!({
-                "op": "qnnEncode",
-                "input": self.input.to_string_lossy(),
-                "output": self.output.to_string_lossy(),
-            }))?;
+fn f32_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for v in values {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    bytes
+}
+
+#[cfg(all(feature = "sam", target_os = "android"))]
+fn f32_values(bytes: &[u8]) -> Vec<f32> {
+    bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
+}
+
+#[cfg(all(feature = "sam", target_os = "android"))]
+impl lightcraft_engine::segment::MobileSamRuntime for MobileSamQnn {
+    fn encode(&self, image: &[f32]) -> std::result::Result<Vec<f32>, String> {
+        const N: usize = 64 * 64 * 256;
+        std::fs::create_dir_all(&self.dir).map_err(|e| format!("MobileSAM folder: {e}"))?;
+        std::fs::write(&self.image, f32_bytes(image)).map_err(|e| format!("MobileSAM image: {e}"))?;
+        let reply = self.bridge.call(json!({
+            "op": "mobileSamEncode",
+            "input": self.image.to_string_lossy(),
+            "output": self.embeddings.to_string_lossy(),
+        }))?;
         let ms = reply.get("ms").and_then(Value::as_u64).unwrap_or(0);
-        let raw = std::fs::read(&self.output).map_err(|e| fail("output", &e))?;
-        if raw.len() != n * 4 {
-            return Err(format!("Hexagon NPU returned {} bytes, expected {}", raw.len(), n * 4));
+        let raw = std::fs::read(&self.embeddings).map_err(|e| format!("MobileSAM embeddings: {e}"))?;
+        if raw.len() != N * 4 {
+            return Err(format!("MobileSAM returned {} embedding bytes, expected {}", raw.len(), N * 4));
         }
-        // NHWC (the graph's layout) to NCHW (what the neck expects).
-        let mut tokens = vec![0f32; n];
-        for (i, px) in raw.chunks_exact(4 * HIDDEN).enumerate() {
-            for c in 0..HIDDEN {
-                let b = &px[c * 4..c * 4 + 4];
-                tokens[c * GRID * GRID + i] = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            }
+        log::info!("MobileSAM encoder: {ms} ms");
+        Ok(f32_values(&raw))
+    }
+
+    fn decode(&self, embeddings: &[f32], points: &[(f32, f32, bool)]) -> std::result::Result<(Vec<f32>, f32), String> {
+        const M: usize = 256 * 256;
+        let mut coords = Vec::with_capacity(points.len() * 2);
+        let mut labels = Vec::with_capacity(points.len());
+        for (x, y, positive) in points {
+            coords.push(*x);
+            coords.push(*y);
+            labels.push(if *positive { 1.0 } else { 0.0 });
         }
-        log::info!("SAM 3 vision backbone on the Hexagon NPU: {ms} ms");
-        Ok(tokens)
+        std::fs::write(&self.embeddings, f32_bytes(embeddings)).map_err(|e| format!("MobileSAM embeddings: {e}"))?;
+        std::fs::write(&self.points, f32_bytes(&coords)).map_err(|e| format!("MobileSAM points: {e}"))?;
+        std::fs::write(&self.labels, f32_bytes(&labels)).map_err(|e| format!("MobileSAM labels: {e}"))?;
+        let reply = self.bridge.call(json!({
+            "op": "mobileSamDecode",
+            "embeddings": self.embeddings.to_string_lossy(),
+            "points": self.points.to_string_lossy(),
+            "labels": self.labels.to_string_lossy(),
+            "mask": self.mask.to_string_lossy(),
+            "score": self.score.to_string_lossy(),
+        }))?;
+        let ms = reply.get("ms").and_then(Value::as_u64).unwrap_or(0);
+        let raw = std::fs::read(&self.mask).map_err(|e| format!("MobileSAM mask: {e}"))?;
+        if raw.len() != M * 4 {
+            return Err(format!("MobileSAM returned {} mask bytes, expected {}", raw.len(), M * 4));
+        }
+        let score_bytes = std::fs::read(&self.score).map_err(|e| format!("MobileSAM score: {e}"))?;
+        if score_bytes.len() != 4 {
+            return Err("MobileSAM returned no score".into());
+        }
+        let score = f32::from_le_bytes([score_bytes[0], score_bytes[1], score_bytes[2], score_bytes[3]]);
+        log::info!("MobileSAM decoder: {ms} ms");
+        Ok((f32_values(&raw), score))
     }
 }
 
@@ -103,40 +135,28 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
     lightcraft_engine::memory::set_budget(512 << 20);
     let mut session = Session::new().with_system_clock();
     session.open_library(dir.join("library"), false).map_err(|e| e.to_string())?;
-    // AI masks: the AI flavor embeds the point-prompt SAM 3 checkpoint in the APK. It is
-    // extracted once into app-private storage; nothing is downloaded and no network
-    // permission is needed. See MainActivity.extractModel and docs/AI_SEGMENTATION.md.
+    // AI masks: the AI edition embeds MobileSAM's two QNN contexts. They are extracted into
+    // app-private storage on first use; nothing is downloaded and no network permission is needed.
+    // See MainActivity.extractQnn and docs/MOBILESAM_NPU.md.
     let model_error: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     #[cfg(feature = "sam")]
     {
-        let model_dir = dir.join("models").join("sam3");
+        let model_dir = dir.join("models").join("mobilesam");
         session.segmenter.dir = Some(model_dir.clone());
         session.segmenter.embedded = true;
         #[cfg(target_os = "android")]
         {
-            // The NPU chain's contexts live beside the checkpoint (extracted on first use).
-            let qnn = model_dir.join("qnn");
-            session.segmenter.npu = Some(Arc::new(NpuEncoder {
+            session.segmenter.mobile = Some(Arc::new(MobileSamQnn {
                 bridge: bridge.clone(),
-                dir: qnn.clone(),
-                input: qnn.join("input.raw"),
-                output: qnn.join("tokens.raw"),
+                dir: model_dir.clone(),
+                image: model_dir.join("image.raw"),
+                embeddings: model_dir.join("embeddings.raw"),
+                points: model_dir.join("points.raw"),
+                labels: model_dir.join("labels.raw"),
+                mask: model_dir.join("mask.raw"),
+                score: model_dir.join("score.raw"),
             }));
         }
-        let b = bridge.clone();
-        let error = model_error.clone();
-        std::thread::Builder::new()
-            .name("sam3-assets".into())
-            .spawn(move || match b.call(json!({"op":"extractModel"})) {
-                Ok(v) => log::info!("AI model assets ready: {v}"),
-                Err(e) => {
-                    log::error!("AI model asset extraction failed: {e}");
-                    if let Ok(mut slot) = error.lock() {
-                        *slot = Some(format!("The AI model could not be prepared: {e}"));
-                    }
-                }
-            })
-            .map_err(|e| format!("could not start AI model extraction: {e}"))?;
     }
     let names: Names = Arc::default();
     let b = bridge.clone();

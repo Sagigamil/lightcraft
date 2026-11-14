@@ -25,3 +25,8 @@ tools/ai/onnx/
 
 # MobileSAM work products (compiled on the device)
 /tools/ai/mobilesam/ctx/
+
+# MobileSAM generated models (exported decoder, DLCs, contexts)
+/tools/ai/mobilesam/*.onnx
+/tools/ai/mobilesam/*.dlc
+/tools/ai/mobilesam/*.bin

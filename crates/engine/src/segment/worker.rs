@@ -17,7 +17,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use lightcraft_develop::SegMask;
-use lightcraft_segment::{Encoded, Sam3};
+use lightcraft_segment::{mobilesam, Encoded, MobileSam, MobileSamRuntime, Sam3};
 
 use super::{Accelerator, Input, Prompt, Tag};
 use crate::media::RenderJob;
@@ -59,6 +59,8 @@ pub struct Job {
     pub reply: mpsc::Sender<Outcome>,
     /// The vision backbone accelerator this request uses (`None`: CPU).
     pub npu: Option<Accelerator>,
+    /// Use MobileSAM for this request (`None`: SAM 3).
+    pub mobile: Option<Arc<dyn MobileSamRuntime>>,
 }
 
 /// A finished request: the segmentation (`None`: nothing selected / nothing to report).
@@ -145,7 +147,7 @@ impl Worker {
     /// Queue an unload of the model and the cached photo; returns at once.
     pub fn unload(&mut self) {
         let (reply, _) = mpsc::channel();
-        let job = Job { dir: PathBuf::new(), key: 0, render: None, missing: None, kind: Kind::Unload, tag: super::Tag::Wait, reply, npu: None };
+        let job = Job { dir: PathBuf::new(), key: 0, render: None, missing: None, kind: Kind::Unload, tag: super::Tag::Wait, reply, npu: None, mobile: None };
         if let Err(e) = self.submit(job) {
             log::warn!("could not queue the AI model unload: {e}");
         }
@@ -184,11 +186,23 @@ impl Worker {
     }
 }
 
+/// A loaded model: SAM 3 (candle) or MobileSAM (external runtime).
+enum Model {
+    Sam3(Sam3),
+    Mobile(MobileSam),
+}
+
+/// The last encoded photo, in the same flavour as the model.
+enum Cached {
+    Sam3(Encoded),
+    Mobile(mobilesam::Encoded),
+}
+
 /// The model and the last encoded photo.
 #[derive(Default)]
 struct State {
-    model: Option<(PathBuf, Sam3)>,
-    cache: Option<(u64, Encoded)>,
+    model: Option<(PathBuf, Model)>,
+    cache: Option<(u64, Cached)>,
 }
 
 /// Whether `later` makes `job` pointless (it asks for the same selection again).
@@ -251,16 +265,19 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration) {
     }
 }
 
-/// The model for `dir`, loading it when needed.
-fn model<'a>(state: &'a mut State, shared: &Shared, dir: &std::path::Path) -> Result<&'a mut Sam3, String> {
-    if state.model.as_ref().is_none_or(|(d, _)| d != dir) {
+/// The model for the job, loading it when needed (SAM 3 from `dir`, or the MobileSAM runtime).
+fn model<'a>(state: &'a mut State, shared: &Shared, job: &Job) -> Result<&'a mut Model, String> {
+    if state.model.as_ref().is_none_or(|(d, _)| d != &job.dir) {
         state.model = None;
         state.cache = None;
         let _busy = Flag::raise(&shared.encoding);
         let t = web_time::Instant::now();
-        let m = Sam3::load(dir).map_err(|e| e.to_string())?;
-        log::info!("SAM 3 loaded in {:?}", t.elapsed());
-        state.model = Some((dir.to_path_buf(), m));
+        let m = match &job.mobile {
+            Some(runtime) => Model::Mobile(MobileSam::new(runtime.clone())),
+            None => Model::Sam3(Sam3::load(&job.dir).map_err(|e| e.to_string())?),
+        };
+        log::info!("AI model loaded in {:?}", t.elapsed());
+        state.model = Some((job.dir.clone(), m));
         shared.loaded.store(true, Ordering::SeqCst);
     }
     state.model.as_mut().map(|(_, m)| m).ok_or_else(|| "the model did not load".to_string())
@@ -297,18 +314,24 @@ fn encode(m: &Sam3, npu: Option<&Accelerator>, rgb: &[u8], w: usize, h: usize) -
 }
 
 /// The model and the encoded photo `job.key` (rendering and encoding it when needed).
-fn encoded<'a>(state: &'a mut State, shared: &Shared, job: &mut Job) -> Result<(&'a mut Sam3, &'a mut Encoded), String> {
-    model(state, shared, &job.dir)?;
+fn encoded<'a>(state: &'a mut State, shared: &Shared, job: &mut Job) -> Result<(&'a mut Model, &'a mut Cached), String> {
+    model(state, shared, job)?;
     if state.cache.as_ref().is_none_or(|(k, _)| *k != job.key) {
         state.cache = None;
         let input = render(job)?;
         let _busy = Flag::raise(&shared.encoding);
         let m = state.model.as_mut().map(|(_, m)| m).ok_or("the model did not load")?;
         let t = web_time::Instant::now();
-        let mut enc = encode(m, job.npu.as_ref(), &input.rgb, input.w, input.h)?;
-        m.prepare_clicks(&mut enc).map_err(|e| e.to_string())?;
-        log::info!("SAM 3 encoded {}×{} in {:?}", input.w, input.h, t.elapsed());
-        state.cache = Some((job.key, enc));
+        let cached = match m {
+            Model::Sam3(sam) => {
+                let mut enc = encode(sam, job.npu.as_ref(), &input.rgb, input.w, input.h)?;
+                sam.prepare_clicks(&mut enc).map_err(|e| e.to_string())?;
+                Cached::Sam3(enc)
+            }
+            Model::Mobile(ms) => Cached::Mobile(ms.encode(&input.rgb, input.w, input.h).map_err(|e| e.to_string())?),
+        };
+        log::info!("AI model encoded {}x{} in {:?}", input.w, input.h, t.elapsed());
+        state.cache = Some((job.key, cached));
     }
     let State { model, cache } = state;
     match (model.as_mut(), cache.as_mut()) {
@@ -317,12 +340,29 @@ fn encoded<'a>(state: &'a mut State, shared: &Shared, job: &mut Job) -> Result<(
     }
 }
 
+/// Segment from clicks with whichever model is loaded.
+fn click_prediction(
+    model: &mut Model,
+    enc: &mut Cached,
+    clicks: &[lightcraft_segment::Click],
+) -> Result<lightcraft_segment::Prediction, String> {
+    match (model, enc) {
+        (Model::Sam3(sam), Cached::Sam3(e)) => sam.segment_clicks(e, clicks).map_err(|e| e.to_string()),
+        (Model::Mobile(ms), Cached::Mobile(e)) => ms.segment_clicks(e, clicks).map_err(|e| e.to_string()),
+        _ => Err("the AI model is inconsistent".into()),
+    }
+}
+
 /// Every phrase of `text` ("car, road"), merged (the per-pixel maximum); `None` when nothing
 /// matches.
-fn text_logits(model: &mut Sam3, enc: &mut Encoded, text: &str) -> Result<Option<Vec<f32>>, String> {
+fn text_logits(model: &mut Model, enc: &mut Cached, text: &str) -> Result<Option<Vec<f32>>, String> {
+    let (sam, enc) = match (model, enc) {
+        (Model::Sam3(sam), Cached::Sam3(enc)) => (sam, enc),
+        _ => return Err("text prompts are not available with this AI model".into()),
+    };
     let mut merged: Option<Vec<f32>> = None;
     for phrase in text.split([',', ';']).map(str::trim).filter(|p| !p.is_empty()) {
-        if let Some(p) = model.segment_text(enc, phrase, 0.5).map_err(|e| e.to_string())? {
+        if let Some(p) = sam.segment_text(enc, phrase, 0.5).map_err(|e| e.to_string())? {
             merged = Some(match merged {
                 None => p.logits,
                 Some(m) => m.iter().zip(&p.logits).map(|(a, b)| a.max(*b)).collect(),
@@ -338,7 +378,7 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job) -> Result<Option<S
         Kind::Unload => {
             *state = State::default();
             shared.loaded.store(false, Ordering::SeqCst);
-            log::info!("SAM 3 unloaded on request (memory pressure)");
+            log::info!("AI model unloaded on request (memory pressure)");
             Ok(None)
         }
         Kind::Prepare => {
@@ -347,7 +387,7 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job) -> Result<Option<S
         }
         Kind::Clicks(clicks) => {
             let (m, enc) = encoded(state, shared, job)?;
-            let p = m.segment_clicks(enc, &clicks).map_err(|e| e.to_string())?;
+            let p = click_prediction(m, enc, &clicks)?;
             Ok(Some(SegMask::from_logits(side, &p.logits)))
         }
         Kind::Text(text) => {
@@ -359,9 +399,12 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job) -> Result<Option<S
         Kind::Panic => panic!("a test panic"),
         Kind::Detail { prompt, region } => {
             let input = render(job)?;
-            let m = model(state, shared, &job.dir)?;
+            let m = model(state, shared, job)?;
             let t = web_time::Instant::now();
-            let mut enc = encode(m, job.npu.as_ref(), &input.rgb, input.w, input.h)?;
+            let mut enc = match m {
+                Model::Sam3(sam) => Cached::Sam3(encode(sam, job.npu.as_ref(), &input.rgb, input.w, input.h)?),
+                Model::Mobile(ms) => Cached::Mobile(ms.encode(&input.rgb, input.w, input.h).map_err(|e| e.to_string())?),
+            };
             let (rw, rh) = (region[2] - region[0], region[3] - region[1]);
             if !(rw > 0.0 && rh > 0.0) {
                 return Ok(None);
@@ -377,11 +420,11 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job) -> Result<Option<S
                     if !inside.iter().any(|c| c.positive) {
                         return Ok(None);
                     }
-                    Some(m.segment_clicks(&mut enc, &inside).map_err(|e| e.to_string())?.logits)
+                    Some(click_prediction(m, &mut enc, &inside)?.logits)
                 }
                 Prompt::Text(text) => text_logits(m, &mut enc, &text)?,
             };
-            log::info!("SAM 3 detail pass ({}×{}) in {:?}", input.w, input.h, t.elapsed());
+            log::info!("AI detail pass ({}x{}) in {:?}", input.w, input.h, t.elapsed());
             Ok(logits.map(|l| SegMask::from_logits_in(side, &l, region)))
         }
     }
@@ -394,7 +437,7 @@ mod tests {
     fn job(tag: Tag, reply: &mpsc::Sender<Outcome>) -> Job {
         // an empty folder: loading fails with an error (no model files)
         let dir = std::env::temp_dir().join(format!("lc-sam3-worker-none-{}", std::process::id()));
-        Job { dir, key: 1, render: None, missing: None, kind: Kind::Prepare, tag, reply: reply.clone(), npu: None }
+        Job { dir, key: 1, render: None, missing: None, kind: Kind::Prepare, tag, reply: reply.clone(), npu: None, mobile: None }
     }
 
     #[test]

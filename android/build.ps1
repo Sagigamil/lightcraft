@@ -51,70 +51,54 @@ function Build-Edition([string]$edition) {
     Invoke-Native (Join-Path $bin 'llvm-strip.exe') @('--strip-debug', $so)
 
     if ($edition -eq 'ai') {
-        # QNN: build the chained-neck runner and stage the Hexagon runtime libs. The SDK is
-        # not in the repo (Qualcomm licence); set QNN_SDK_ROOT to the QAIRT SDK directory.
+        # MobileSAM: the encoder's QNN context was compiled for the HTP on the device, the
+        # 8-point decoder context for the QNN CPU backend. The SDK is not in the repo (Qualcomm
+        # licence); set QNN_SDK_ROOT to the QAIRT SDK directory.
         $qnnSdk = $env:QNN_SDK_ROOT
         if (-not $qnnSdk) {
-            throw "Set QNN_SDK_ROOT to the QAIRT/QNN SDK (for example ...\qairt\2.50.0.260828) to build the AI edition's NPU runner."
+            throw "Set QNN_SDK_ROOT to the QAIRT/QNN SDK (for example ...\qairt\2.50.0.260828) to build the AI edition's MobileSAM runner."
         }
         $libs = Join-Path $qnnSdk 'lib/aarch64-android'
-        Write-Output '=== Building the QNN chain runner ==='
-        $qnnBuild = Join-Path $repo 'build/qnn_chain_android'
+        Write-Output '=== Building the MobileSAM runner ==='
+        $mobileBuild = Join-Path $repo 'build/mobilesam_android'
         $legacyToolchain = Join-Path $ndk 'build/cmake/android.toolchain.cmake'
-        Invoke-Native 'cmake' @('-S', (Join-Path $repo 'tools/ai/qnn_chain'), '-B', $qnnBuild,
+        Invoke-Native 'cmake' @('-S', (Join-Path $repo 'tools/ai/mobilesam'), '-B', $mobileBuild,
             "-DCMAKE_TOOLCHAIN_FILE=$legacyToolchain", '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-29',
             "-DQNN_SDK_ROOT=$qnnSdk", '-G', 'Ninja')
-        Invoke-Native 'cmake' @('--build', $qnnBuild, '-j', '8')
-        Copy-Item -LiteralPath (Join-Path $qnnBuild 'libqnn_chain.so') -Destination (Join-Path $dest 'libqnn_chain.so') -Force
-        Invoke-Native (Join-Path $bin 'llvm-strip.exe') @('--strip-debug', (Join-Path $dest 'libqnn_chain.so'))
-        # The QNN host libraries and the Hexagon skeleton must be real files in the app's
-        # native library directory (Android forbids dlopen from app data), so they are jniLibs
-        # and the AI edition extracts native libraries at install time.
-        foreach ($lib in @('libQnnHtp.so','libQnnHtpV81Stub.so','libQnnSystem.so','libQnnModelDlc.so')) {
+        Invoke-Native 'cmake' @('--build', $mobileBuild, '-j', '8')
+        Copy-Item -LiteralPath (Join-Path $mobileBuild 'libmobilesam.so') -Destination (Join-Path $dest 'libmobilesam.so') -Force
+        Invoke-Native (Join-Path $bin 'llvm-strip.exe') @('--strip-debug', (Join-Path $dest 'libmobilesam.so'))
+        # The QNN host libraries and the Hexagon skeleton must be real files in the app's native
+        # library directory (Android forbids dlopen from app data); they are jniLibs and the AI
+        # edition extracts native libraries at install time.
+        foreach ($lib in @('libQnnHtp.so','libQnnHtpV81Stub.so','libQnnCpu.so')) {
             Copy-Item -LiteralPath (Join-Path $libs $lib) -Destination (Join-Path $dest $lib) -Force
         }
         Copy-Item -LiteralPath (Join-Path $qnnSdk 'lib/hexagon-v81/unsigned/libQnnHtpV81Skel.so') -Destination (Join-Path $dest 'libQnnHtpV81Skel.so') -Force
 
-        # The compiled context binaries (tools/ai/onnx is generated, never committed).
+        # The two contexts and their manifest (never committed; produced by the MobileSAM steps in
+        # docs/MOBILESAM_NPU.md).
         $qnnAssets = Join-Path $PSScriptRoot 'app/src/ai/assets/qnn'
         New-Item -ItemType Directory -Force $qnnAssets | Out-Null
-        Copy-Item -LiteralPath (Join-Path $repo 'tools/ai/qnn_manifest.json') -Destination (Join-Path $qnnAssets 'manifest.json') -Force
+        Copy-Item -LiteralPath (Join-Path $repo 'tools/ai/mobilesam/manifest.json') -Destination (Join-Path $qnnAssets 'manifest.json') -Force
         $artifacts = @{
-            'stem_context.bin' = Join-Path $repo 'tools/ai/onnx/ends/stem_context.bin'
-            'blocks0_16_context.bin' = Join-Path $repo 'tools/ai/onnx/blocks0_16/blocks0_16_context.bin'
-            'blocks16_32_context.bin' = Join-Path $repo 'tools/ai/onnx/blocks16_32/blocks16_32_context.bin'
+            'encoder_ctx.bin' = Join-Path $repo 'tools/ai/mobilesam/ctx/encoder_ctx.bin'
+            'decoder8_cpu.bin' = Join-Path $repo 'tools/ai/mobilesam/decoder8_cpu.bin'
         }
-        $qnnManifest = Get-Content -LiteralPath (Join-Path $repo 'tools/ai/qnn_manifest.json') -Raw | ConvertFrom-Json
-        foreach ($name in $artifacts.Keys) {
-            $source = $artifacts[$name]
+        $mobileManifest = Get-Content -LiteralPath (Join-Path $repo 'tools/ai/mobilesam/manifest.json') -Raw | ConvertFrom-Json
+        foreach ($artifact in $artifacts.Keys) {
+            $source = $artifacts[$artifact]
             if (-not (Test-Path -LiteralPath $source)) {
-                throw "NPU artifact $name is missing: $source (compile the contexts with tools/ai/export_sam3_block.py and compile_snapdragon.py)."
+                throw "MobileSAM artifact $artifact is missing: $source (see docs/MOBILESAM_NPU.md)."
             }
-            $target = Join-Path $qnnAssets $name
+            $target = Join-Path $qnnAssets $artifact
             if (-not (Test-Path -LiteralPath $target) -or
                 (Get-Item -LiteralPath $target).Length -ne (Get-Item -LiteralPath $source).Length) {
                 Copy-Item -LiteralPath $source -Destination $target -Force
             }
-            $want = $qnnManifest.files.$name.size
+            $want = $mobileManifest.files.$artifact.size
             $have = (Get-Item -LiteralPath $target).Length
-            if ($have -ne $want) { throw "NPU artifact $name is $have bytes, expected $want." }
-        }
-
-        $assets = Join-Path $PSScriptRoot 'app/src/ai/assets/sam3'
-        $manifestPath = Join-Path $assets 'manifest.json'
-        if (-not (Test-Path -LiteralPath $manifestPath)) {
-            throw "AI assets are missing: run 'python tools/ai/prepare_models.py --accept-license --source-pt <sam3.pt>' first."
-        }
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-        foreach ($file in @('model.safetensors','vocab.json','merges.txt','LICENSE')) {
-            $path = Join-Path $assets $file
-            if (-not (Test-Path -LiteralPath $path)) { throw "AI asset missing: $path" }
-            $expected = $manifest.files.$file.size
-            $actual = (Get-Item -LiteralPath $path).Length
-            if ($actual -ne $expected) { throw "AI asset $file is $actual bytes, expected $expected (run prepare_models.py --check)." }
-        }
-        if ($manifest.textPrompts) {
-            Write-Output 'Warning: the embedded checkpoint keeps text prompts; the Android UI still hides Describe in this build.'
+            if ($have -ne $want) { throw "MobileSAM artifact $artifact is $have bytes, expected $want." }
         }
     }
 

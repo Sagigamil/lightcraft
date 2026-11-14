@@ -121,6 +121,8 @@ pub type Accelerator = std::sync::Arc<dyn lightcraft_segment::BackboneEncoder>;
 
 #[cfg(feature = "sam")]
 pub use lightcraft_segment::BackboneEncoder;
+#[cfg(feature = "sam")]
+pub use lightcraft_segment::MobileSamRuntime;
 
 /// The model (on its worker thread), the download, and AI mask requests in flight.
 pub struct Segmenter {
@@ -133,6 +135,10 @@ pub struct Segmenter {
     /// failure uses the CPU backbone.
     #[cfg(feature = "sam")]
     pub npu: Option<Accelerator>,
+    /// Use MobileSAM instead of SAM 3 (the Android AI edition): its encoder runs on the NPU and
+    /// its decoder on the CPU backend. When set, the SAM 3 model files are not needed.
+    #[cfg(feature = "sam")]
+    pub mobile: Option<std::sync::Arc<dyn lightcraft_segment::MobileSamRuntime>>,
     /// The user's list of download mirrors (one base URL per line), if any.
     pub mirrors_file: Option<PathBuf>,
     /// Run requests in the background and apply them in [`Session::segment_poll`] (the
@@ -157,6 +163,8 @@ impl Default for Segmenter {
             embedded: false,
             #[cfg(feature = "sam")]
             npu: None,
+            #[cfg(feature = "sam")]
+            mobile: None,
             mirrors_file: None,
             background: false,
             pending: None,
@@ -175,14 +183,14 @@ impl Segmenter {
     /// Whether this build can compute AI masks at all.
     pub const AVAILABLE: bool = cfg!(feature = "sam");
 
-    /// The inference backend this build uses: the Hexagon NPU runs the vision backbone on the
-    /// Android AI build; the neck, decoder and detector are the pure-Rust engine on the CPU.
+    /// The inference backend this build uses: the Android AI edition runs MobileSAM's encoder on
+    /// the Hexagon NPU and its decoder on the QNN CPU backend; the desktop engine runs SAM 3.
     pub fn backend(&self) -> &'static str {
         if !Self::AVAILABLE {
             return "none";
         }
         #[cfg(feature = "sam")]
-        if self.npu.is_some() {
+        if self.mobile.is_some() || self.npu.is_some() {
             return "npu+cpu";
         }
         if cfg!(target_os = "macos") {
@@ -201,8 +209,13 @@ impl Segmenter {
     /// Whether the model's files are in place.
     pub fn installed(&self) -> bool {
         #[cfg(feature = "sam")]
-        if let Some(dir) = &self.dir {
-            return lightcraft_segment::is_model_dir(dir);
+        {
+            if self.mobile.is_some() {
+                return true;
+            }
+            if let Some(dir) = &self.dir {
+                return lightcraft_segment::is_model_dir(dir);
+            }
         }
         false
     }
@@ -270,6 +283,10 @@ impl Segmenter {
     pub fn model_dir(&self) -> Result<PathBuf, String> {
         if !Self::AVAILABLE {
             return Err("AI masks are not available in this build".into());
+        }
+        #[cfg(feature = "sam")]
+        if self.mobile.is_some() {
+            return Ok(self.dir.clone().unwrap_or_default());
         }
         let dir = self.dir.clone().ok_or("no folder is set for the SAM 3 model")?;
         if self.installed() {
@@ -460,7 +477,17 @@ impl Session {
                 job
             }
         };
-        Ok(worker::Job { dir, key: if region.is_some() { 0 } else { key }, render: Some(render), missing, kind, tag, reply, npu: self.segmenter.npu.clone() })
+        Ok(worker::Job {
+            dir,
+            key: if region.is_some() { 0 } else { key },
+            render: Some(render),
+            missing,
+            kind,
+            tag,
+            reply,
+            npu: self.segmenter.npu.clone(),
+            mobile: self.segmenter.mobile.clone(),
+        })
     }
 
     /// Send a request and wait for its result (CLI, MCP, tests; or when not in background mode).

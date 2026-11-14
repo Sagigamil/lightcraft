@@ -1,0 +1,10 @@
+{
+  "formatVersion": 1,
+  "runtime": "QNN 2.50 (MobileSAM, AI Hub qnn_dlc-float)",
+  "soc": "Hexagon v81 (SM8850P) encoder, QNN CPU decoder",
+  "note": "encoder_ctx.bin was compiled on the device from Qualcomm's encoder.dlc; decoder8_cpu.bin is the 8-point decoder re-export compiled for the CPU backend. See docs/MOBILESAM_NPU.md.",
+  "files": {
+    "encoder_ctx.bin": { "size": 36055664 },
+    "decoder8_cpu.bin": { "size": 20629632 }
+  }
+}

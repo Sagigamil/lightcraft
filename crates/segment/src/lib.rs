@@ -34,6 +34,8 @@ mod detector;
 pub mod fetch;
 pub mod mask;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod mobilesam;
+#[cfg(not(target_arch = "wasm32"))]
 mod neck;
 #[cfg(not(target_arch = "wasm32"))]
 mod nn;
@@ -56,6 +58,8 @@ use candle_nn::VarBuilder;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use tracker::Click;
+#[cfg(not(target_arch = "wasm32"))]
+pub use mobilesam::{MobileSam, MobileSamRuntime};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
