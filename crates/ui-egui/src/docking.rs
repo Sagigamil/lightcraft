@@ -260,13 +260,36 @@ fn from_ui(app: &crate::LightcraftApp) -> Workspace {
 fn sync(workspace: &mut Workspace, app: &crate::LightcraftApp) -> Result<(), String> {
     set_visible(workspace, Panel::Library, app.ui.left_panel)?;
     set_visible(workspace, Panel::Tools, app.ui.right != crate::state::RightPanel::None)?;
-    // On a tablet Presets is a tab in the Tools column, so it costs no width: keep it there
-    // (the saved layout from a wider screen may not hold it, and a published state would hide it).
+    // A tablet is too narrow for a Presets column of its own: it opens as a tab in the Tools
+    // column, never where a wider screen remembered it.
     #[cfg(target_os = "android")]
-    let presets = true;
-    #[cfg(not(target_os = "android"))]
-    let presets = app.ui.presets;
-    set_visible(workspace, Panel::Presets, presets)
+    if app.ui.presets && !workspace.layout.contains(&Panel::Presets) {
+        let location = home(workspace, Panel::Presets);
+        if let Some((_, remembered)) = workspace.hidden.iter_mut().find(|(panel, _)| *panel == Panel::Presets) {
+            *remembered = location;
+        }
+    }
+    set_visible(workspace, Panel::Presets, app.ui.presets)?;
+    #[cfg(target_os = "android")]
+    join_presets(workspace)?;
+    Ok(())
+}
+
+/// On a tablet Presets and Tools share one column as tabs. A saved layout (or a drag) can leave
+/// Presets in a column or group of its own; the column it then gets is whatever the photo leaves,
+/// a sliver. It goes back into the Tools group.
+#[cfg(target_os = "android")]
+fn join_presets(workspace: &mut Workspace) -> Result<(), String> {
+    if !workspace.layout.contains(&Panel::Presets) || !workspace.layout.contains(&Panel::Tools) {
+        return Ok(());
+    }
+    let Ok(location) = workspace.layout.location(&Panel::Presets) else { return Ok(()) };
+    // A tab in another panel's group reports that panel as its anchor, so the placement tells
+    // the two apart: only a tab already beside Tools stays where it is.
+    if !matches!(location.placement, Placement::Tab { .. }) {
+        apply(workspace, Action::Move { panel: Panel::Presets, anchor: Panel::Tools, placement: Placement::Tab { before: None } })?;
+    }
+    Ok(())
 }
 
 fn publish_visibility(app: &mut crate::LightcraftApp, workspace: &Workspace) {

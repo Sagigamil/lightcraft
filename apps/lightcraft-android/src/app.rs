@@ -295,7 +295,18 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
     let mut store = FsStore::open(&dir).map_err(|e| e.to_string())?;
     let saved = store.read("ui.json").map_err(|e| e.to_string())?.unwrap_or_default();
     if !saved.is_empty() {
-        match serde_json::from_slice::<UiState>(&saved) {
+        // The tablet did not go through the desktop's settings migration, so an arrangement
+        // saved before the current docking generation (a Presets column of its own, wider than
+        // the screen) has to be dropped here or it is never rebuilt.
+        let loaded: Result<UiState, String> = match serde_json::from_slice::<Value>(&saved) {
+            Ok(Value::Object(mut fields)) => {
+                lightcraft_ui_egui::docking::drop_outdated(&mut fields);
+                serde_json::from_value(Value::Object(fields)).map_err(|e| e.to_string())
+            }
+            Ok(_) => Err("the saved settings are not an object".into()),
+            Err(e) => Err(e.to_string()),
+        };
+        match loaded {
             Ok(ui) => inner.ui = ui.sanitized(),
             Err(e) => {
                 store.write_atomic("ui.corrupt.json", &saved).map_err(|e| e.to_string())?;
