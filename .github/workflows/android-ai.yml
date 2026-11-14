@@ -11,10 +11,12 @@ name: Android MobileSAM build
 # the contexts were compiled with). See docs/ANDROID_APKS.md.
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-mobilesam-${{ github.ref }}
@@ -65,7 +67,15 @@ jobs:
         with:
           key: ci-android-mobilesam
 
+      - name: Restore the QNN SDK cache
+        id: qnn-cache
+        uses: actions/cache@v4
+        with:
+          path: D:\qnn-sdk
+          key: qnn-sdk-2.50.0.260828-v1
+
       - name: Fetch the QNN SDK
+        if: steps.qnn-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $zip = "D:\qnn-sdk.zip"
@@ -73,15 +83,29 @@ jobs:
           if (-not (Test-Path $zip) -or (Get-Item $zip).Length -lt 1GB) {
             throw "The QNN SDK download failed or is truncated: $zip"
           }
-          New-Item -ItemType Directory -Force "D:\qnn" | Out-Null
           Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, "D:\qnn")
-          $qnn = Get-ChildItem "D:\qnn" -Recurse -Directory -Filter QNN |
-            Where-Object { $_.FullName -match 'include\\QNN$' } | Select-Object -First 1
-          if (-not $qnn) { throw "The QNN SDK has no include/QNN directory." }
-          $root = Split-Path (Split-Path $qnn.FullName) -Parent
-          "QNN_SDK_ROOT=$root" >> $env:GITHUB_ENV
-          Write-Output "QNN_SDK_ROOT=$root"
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            foreach ($entry in $archive.Entries) {
+              if ($entry.FullName -notmatch '/(include/QNN/|lib/aarch64-android/|lib/hexagon-v81/unsigned/)') { continue }
+              $rel = $entry.FullName -replace '^.*?/(include/QNN/|lib/aarch64-android/|lib/hexagon-v81/unsigned/)', '$1'
+              $dest = Join-Path "D:\qnn-sdk" $rel
+              if ($entry.Name -eq '') {
+                New-Item -ItemType Directory -Force $dest | Out-Null
+              } else {
+                New-Item -ItemType Directory -Force (Split-Path $dest -Parent) | Out-Null
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $dest, $true)
+              }
+            }
+          } finally { $archive.Dispose() }
+          Remove-Item $zip -Force
+          if (-not (Test-Path "D:\qnn-sdk\include\QNN\QnnInterface.h")) {
+            throw "The QNN SDK has no include/QNN/QnnInterface.h."
+          }
+
+      - name: Point the build at the QNN SDK
+        shell: pwsh
+        run: "QNN_SDK_ROOT=D:\qnn-sdk" >> $env:GITHUB_ENV
 
       - name: Fetch the MobileSAM contexts
         shell: pwsh
@@ -109,3 +133,18 @@ jobs:
           name: lightcraft-mobilesam-${{ github.sha }}
           path: android/dist/Lightcraft-MobileSAM.apk
           retention-days: 14
+
+      - name: Publish the latest MobileSAM APK
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "android-mobilesam-latest"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --prerelease `
+              --title "MobileSAM (latest)" `
+              --notes "Latest MobileSAM APK built from main. Updated automatically."
+          }
+          gh release upload $tag android/dist/Lightcraft-MobileSAM.apk --clobber --repo $env:GITHUB_REPOSITORY
