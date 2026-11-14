@@ -2,7 +2,9 @@ app/build/
 .gradle/
 app/src/main/jniLibs/
 build/reports/
-app/src/ai/assets/
-app/src/ai/jniLibs/
 app/src/lite/jniLibs/
+app/src/sam3/assets/
+app/src/sam3/jniLibs/
+app/src/mobilesam/assets/
+app/src/mobilesam/jniLibs/
 dist/

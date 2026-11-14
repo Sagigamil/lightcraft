@@ -26,11 +26,17 @@ android {
             applicationId = "com.lightcraft.android"
             versionNameSuffix = ""
         }
-        // AI embeds the point-prompt SAM 3 checkpoint and the pure-Rust inference runtime.
-        create("ai") {
+        // SAM 3 embeds the point-prompt checkpoint and the chained QNN contexts.
+        create("sam3") {
             dimension = "edition"
-            applicationId = "com.lightcraft.android.ai"
-            versionNameSuffix = "-ai"
+            applicationId = "com.lightcraft.android"
+            versionNameSuffix = "-sam3"
+        }
+        // MobileSAM embeds the HTP encoder + CPU decoder QNN contexts.
+        create("mobilesam") {
+            dimension = "edition"
+            applicationId = "com.lightcraft.android"
+            versionNameSuffix = "-mobilesam"
         }
     }
     androidResources {

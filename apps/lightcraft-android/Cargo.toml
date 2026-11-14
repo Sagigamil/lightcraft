@@ -16,8 +16,12 @@ serde_json.workspace = true
 log.workspace = true
 
 [features]
-# The AI flavor embeds the SAM 3 point-prompt checkpoint and enables AI masks.
+# AI masks (Object / Describe). The two AI flavors each enable exactly one engine:
+# `sam3` embeds the point-prompt SAM 3 checkpoint, `mobilesam` embeds the MobileSAM QNN
+# contexts. The Lite flavor enables neither (no AI code compiled).
 sam = ["lightcraft-engine/sam"]
+sam3 = ["sam"]
+mobilesam = ["sam"]
 # A release build for device debugging: the loopback control channel (never shipped).
 control = []
 

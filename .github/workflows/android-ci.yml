@@ -70,21 +70,21 @@ jobs:
       - name: Prepare native library
         run: |
           bin="${{ github.workspace }}/android-sdk/ndk/${{ env.ANDROID_NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          mkdir -p android/app/src/main/jniLibs/arm64-v8a
-          cp target/aarch64-linux-android/release/liblightcraft_android.so android/app/src/main/jniLibs/arm64-v8a/
-          "$bin/llvm-strip" --strip-debug android/app/src/main/jniLibs/arm64-v8a/liblightcraft_android.so
+          mkdir -p android/app/src/lite/jniLibs/arm64-v8a
+          cp target/aarch64-linux-android/release/liblightcraft_android.so android/app/src/lite/jniLibs/arm64-v8a/
+          "$bin/llvm-strip" --strip-debug android/app/src/lite/jniLibs/arm64-v8a/liblightcraft_android.so
 
       - name: Build APK
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleRelease -PandroidAbi=arm64-v8a --console=plain
+          ./gradlew assembleLiteRelease -PandroidAbi=arm64-v8a --console=plain
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lightcraft-android-arm64-v8a
-          path: android/app/build/outputs/apk/release/app-release.apk
+          name: lightcraft-android-lite-arm64-v8a
+          path: android/app/build/outputs/apk/lite/release/app-lite-release.apk
           retention-days: 30
 
       - name: Create GitHub Release
@@ -93,7 +93,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="android-$(date +%Y%m%d-%H%M%S)"
-          apk="android/app/build/outputs/apk/release/app-release.apk"
+          apk="android/app/build/outputs/apk/lite/release/app-lite-release.apk"
           gh release create "$tag" \
             --title "LightCraft Android (build $tag)" \
             --notes "Automatic build from main branch. SHA: ${GITHUB_SHA::9}" \

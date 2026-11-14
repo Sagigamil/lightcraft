@@ -1,0 +1,110 @@
+name: Android AI builds
+
+# The AI flavors embed Qualcomm QNN runtimes and Meta/Qualcomm model binaries that are not in
+# the repository (licences and size). This manual workflow fetches them from the secret
+# AI_BUNDLE_URL and builds the requested APK. The regular Android CI builds only Lite.
+#
+# The bundle is a zip extracted at the repository root with this layout:
+#
+#   qnn-sdk/                                  the QAIRT/QNN SDK root (include/QNN, lib/aarch64-android,
+#                                             lib/hexagon-v81/unsigned)
+#   tools/ai/onnx/ends/stem_context.bin
+#   tools/ai/onnx/blocks0_16/blocks0_16_context.bin
+#   tools/ai/onnx/blocks16_32/blocks16_32_context.bin
+#   tools/ai/mobilesam/ctx/encoder_ctx.bin
+#   tools/ai/mobilesam/decoder8m_cpu.bin
+#   android/app/src/sam3/assets/sam3/{manifest.json,model.safetensors,vocab.json,merges.txt,LICENSE}
+#
+# See docs/ANDROID_APKS.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: Which edition(s) to build
+        required: true
+        type: choice
+        options: [All, SAM3, MobileSAM]
+        default: All
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-ai-${{ github.ref }}-${{ inputs.edition }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  ANDROID_NDK_VERSION: "28.2.13676358"
+
+jobs:
+  build-ai:
+    name: Build AI APK (${{ inputs.edition }})
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: microsoft
+          java-version: "17"
+
+      - name: Setup Android SDK and NDK
+        shell: pwsh
+        run: |
+          $sdk = $env:ANDROID_HOME
+          if (-not $sdk) { $sdk = "$env:LOCALAPPDATA\Android\Sdk" }
+          $sdkmanager = Join-Path $sdk "cmdline-tools\latest\bin\sdkmanager.bat"
+          if (-not (Test-Path $sdkmanager)) {
+            New-Item -ItemType Directory -Force (Join-Path $sdk "cmdline-tools") | Out-Null
+            Invoke-WebRequest "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip" -OutFile cmdline-tools.zip
+            Expand-Archive cmdline-tools.zip -DestinationPath (Join-Path $sdk "cmdline-tools") -Force
+            Move-Item (Join-Path $sdk "cmdline-tools\cmdline-tools") (Join-Path $sdk "cmdline-tools\latest") -Force
+            $sdkmanager = Join-Path $sdk "cmdline-tools\latest\bin\sdkmanager.bat"
+          }
+          & $sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;$env:ANDROID_NDK_VERSION" --sdk_root="$sdk"
+          "ANDROID_HOME=$sdk" >> $env:GITHUB_ENV
+          "ANDROID_SDK_ROOT=$sdk" >> $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-android-ai-${{ inputs.edition }}
+
+      - name: Fetch the AI artifacts bundle
+        shell: pwsh
+        env:
+          AI_BUNDLE_URL: ${{ secrets.AI_BUNDLE_URL }}
+        run: |
+          if (-not $env:AI_BUNDLE_URL) {
+            throw "Add the AI_BUNDLE_URL repository secret: a zip with the layout in docs/ANDROID_APKS.md."
+          }
+          Invoke-WebRequest -Uri $env:AI_BUNDLE_URL -OutFile (Join-Path $env:RUNNER_TEMP "ai-bundle.zip")
+          Expand-Archive (Join-Path $env:RUNNER_TEMP "ai-bundle.zip") -DestinationPath $env:GITHUB_WORKSPACE -Force
+          if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE "qnn-sdk/include/QNN/QnnInterface.h"))) {
+            throw "The bundle has no qnn-sdk/include/QNN (see docs/ANDROID_APKS.md)."
+          }
+
+      - name: Build the APK
+        shell: pwsh
+        env:
+          QNN_SDK_ROOT: ${{ github.workspace }}\qnn-sdk
+        run: |
+          .\android\build.ps1 -Edition "${{ inputs.edition }}" -Configuration Release
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightcraft-ai-${{ inputs.edition }}-${{ github.sha }}
+          path: |
+            android/dist/Lightcraft-SAM3.apk
+            android/dist/Lightcraft-MobileSAM.apk
+          if-no-files-found: ignore
+          retention-days: 14

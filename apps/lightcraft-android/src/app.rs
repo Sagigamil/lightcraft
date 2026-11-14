@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+﻿#![forbid(unsafe_code)]
 use super::platform::Bridge;
 use eframe::egui;
 use lightcraft_catalog::{FsStore, Store};
@@ -18,11 +18,15 @@ use std::{
 };
 
 use super::sources::Names;
+
+#[cfg(all(feature = "sam3", feature = "mobilesam"))]
+compile_error!("enable exactly one AI engine: `sam3` or `mobilesam` (or neither for the Lite build)");
+
 struct ImportResult {
     prepared: Prepared,
     options: ImportOptions,
     now: String,
-    /// The album the photos also go to (an album's Add Photos from Folder…).
+    /// The album the photos also go to (an album's Add Photos from Folderג€¦).
     album: Option<u64>,
 }
 
@@ -44,11 +48,64 @@ struct App {
     model_error: Arc<std::sync::Mutex<Option<String>>>,
 }
 
+/// SAM 3's vision backbone on the Hexagon NPU (the SAM 3 edition's QNN chain).
+///
+/// The Rust worker hands over the preprocessed image; Java extracts the context binaries once
+/// and `libqnn_chain.so` runs stem + two 16-block chunks on the HTP, returning the token
+/// tensor. The neck and decoder stay in the Rust engine, and any failure falls back to the
+/// CPU backbone in the worker.
+#[cfg(all(feature = "sam3", not(feature = "mobilesam"), target_os = "android"))]
+struct NpuEncoder {
+    bridge: Arc<Bridge>,
+    dir: std::path::PathBuf,
+    input: std::path::PathBuf,
+    output: std::path::PathBuf,
+}
+
+#[cfg(all(feature = "sam3", not(feature = "mobilesam"), target_os = "android"))]
+impl lightcraft_engine::segment::BackboneEncoder for NpuEncoder {
+    fn encode(&self, pixels: &[f32]) -> std::result::Result<Vec<f32>, String> {
+        const GRID: usize = 72;
+        const HIDDEN: usize = 1024;
+        let n = GRID * GRID * HIDDEN;
+        let fail = |what: &str, e: &dyn std::fmt::Display| format!("Hexagon NPU {what}: {e}");
+        std::fs::create_dir_all(&self.dir).map_err(|e| fail("folder", &e))?;
+        // The Java side reads the raw f32 tensor; Android is little-endian (aarch64).
+        let mut bytes = Vec::with_capacity(pixels.len() * 4);
+        for v in pixels {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(&self.input, &bytes).map_err(|e| fail("input", &e))?;
+        let reply = self
+            .bridge
+            .call(json!({
+                "op": "qnnEncode",
+                "input": self.input.to_string_lossy(),
+                "output": self.output.to_string_lossy(),
+            }))?;
+        let ms = reply.get("ms").and_then(Value::as_u64).unwrap_or(0);
+        let raw = std::fs::read(&self.output).map_err(|e| fail("output", &e))?;
+        if raw.len() != n * 4 {
+            return Err(format!("Hexagon NPU returned {} bytes, expected {}", raw.len(), n * 4));
+        }
+        // NHWC (the graph's layout) to NCHW (what the neck expects).
+        let mut tokens = vec![0f32; n];
+        for (i, px) in raw.chunks_exact(4 * HIDDEN).enumerate() {
+            for c in 0..HIDDEN {
+                let b = &px[c * 4..c * 4 + 4];
+                tokens[c * GRID * GRID + i] = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            }
+        }
+        log::info!("SAM 3 vision backbone on the Hexagon NPU: {ms} ms");
+        Ok(tokens)
+    }
+}
+
 /// MobileSAM on the device: the encoder on the Hexagon HTP, the prompt decoder on the QNN CPU
 /// backend. Java extracts the two contexts on first use; Rust writes the image and prompt tensors
 /// and reads the embeddings and mask back. The masking UI and the mask representation are the
 /// same as with SAM 3.
-#[cfg(all(feature = "sam", target_os = "android"))]
+#[cfg(all(feature = "mobilesam", target_os = "android"))]
 struct MobileSamQnn {
     bridge: Arc<Bridge>,
     dir: std::path::PathBuf,
@@ -60,7 +117,7 @@ struct MobileSamQnn {
     score: std::path::PathBuf,
 }
 
-#[cfg(all(feature = "sam", target_os = "android"))]
+#[cfg(all(feature = "mobilesam", target_os = "android"))]
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * 4);
     for v in values {
@@ -69,12 +126,12 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
     bytes
 }
 
-#[cfg(all(feature = "sam", target_os = "android"))]
+#[cfg(all(feature = "mobilesam", target_os = "android"))]
 fn f32_values(bytes: &[u8]) -> Vec<f32> {
     bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
 }
 
-#[cfg(all(feature = "sam", target_os = "android"))]
+#[cfg(all(feature = "mobilesam", target_os = "android"))]
 impl lightcraft_engine::segment::MobileSamRuntime for MobileSamQnn {
     fn encode(&self, image: &[f32]) -> std::result::Result<Vec<f32>, String> {
         const N: usize = 64 * 64 * 256;
@@ -138,27 +195,62 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
     lightcraft_engine::memory::set_budget(512 << 20);
     let mut session = Session::new().with_system_clock();
     session.open_library(dir.join("library"), false).map_err(|e| e.to_string())?;
-    // AI masks: the AI edition embeds MobileSAM's two QNN contexts. They are extracted into
-    // app-private storage on first use; nothing is downloaded and no network permission is needed.
-    // See MainActivity.extractQnn and docs/MOBILESAM_NPU.md.
+    // AI masks. The SAM 3 flavor embeds the point-prompt checkpoint and the chained QNN
+    // contexts; the MobileSAM flavor embeds its encoder/decoder contexts. Both are extracted
+    // into app-private storage on first use; nothing is downloaded and no network permission
+    // is needed. The Lite flavor compiles no AI engine at all.
     let model_error: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     #[cfg(feature = "sam")]
     {
-        let model_dir = dir.join("models").join("mobilesam");
-        session.segmenter.dir = Some(model_dir.clone());
-        session.segmenter.embedded = true;
-        #[cfg(target_os = "android")]
+        #[cfg(all(feature = "sam3", not(feature = "mobilesam")))]
         {
-            session.segmenter.mobile = Some(Arc::new(MobileSamQnn {
-                bridge: bridge.clone(),
-                dir: model_dir.clone(),
-                image: model_dir.join("image.raw"),
-                embeddings: model_dir.join("embeddings.raw"),
-                points: model_dir.join("points.raw"),
-                labels: model_dir.join("labels.raw"),
-                mask: model_dir.join("mask.raw"),
-                score: model_dir.join("score.raw"),
-            }));
+            let model_dir = dir.join("models").join("sam3");
+            session.segmenter.dir = Some(model_dir.clone());
+            session.segmenter.embedded = true;
+            #[cfg(target_os = "android")]
+            {
+                // The NPU chain's contexts live beside the checkpoint (extracted on first use).
+                let qnn = model_dir.join("qnn");
+                session.segmenter.npu = Some(Arc::new(NpuEncoder {
+                    bridge: bridge.clone(),
+                    dir: qnn.clone(),
+                    input: qnn.join("input.raw"),
+                    output: qnn.join("tokens.raw"),
+                }));
+            }
+            let b = bridge.clone();
+            let error = model_error.clone();
+            std::thread::Builder::new()
+                .name("sam3-assets".into())
+                .spawn(move || match b.call(json!({"op":"extractModel"})) {
+                    Ok(v) => log::info!("AI model assets ready: {v}"),
+                    Err(e) => {
+                        log::error!("AI model asset extraction failed: {e}");
+                        if let Ok(mut slot) = error.lock() {
+                            *slot = Some(format!("The AI model could not be prepared: {e}"));
+                        }
+                    }
+                })
+                .map_err(|e| format!("could not start AI model extraction: {e}"))?;
+        }
+        #[cfg(feature = "mobilesam")]
+        {
+            let model_dir = dir.join("models").join("mobilesam");
+            session.segmenter.dir = Some(model_dir.clone());
+            session.segmenter.embedded = true;
+            #[cfg(target_os = "android")]
+            {
+                session.segmenter.mobile = Some(Arc::new(MobileSamQnn {
+                    bridge: bridge.clone(),
+                    dir: model_dir.clone(),
+                    image: model_dir.join("image.raw"),
+                    embeddings: model_dir.join("embeddings.raw"),
+                    points: model_dir.join("points.raw"),
+                    labels: model_dir.join("labels.raw"),
+                    mask: model_dir.join("mask.raw"),
+                    score: model_dir.join("score.raw"),
+                }));
+            }
         }
     }
     let names: Names = Arc::default();
@@ -202,7 +294,7 @@ pub fn run(android: android_activity::AndroidApp) -> Result<(), String> {
             let _ = b.call(json!({"op":"open"}));
             vec![]
         })),
-        // an album's Add Photos from Folder… comes back to us (`request_folder_import`): SAF picks
+        // an album's Add Photos from Folderג€¦ comes back to us (`request_folder_import`): SAF picks
         host_folder_import: true,
         ..Default::default()
     };
@@ -330,7 +422,7 @@ impl App {
                 for event in reply.get("events").and_then(Value::as_array).into_iter().flatten() {
                     match event.get("kind").and_then(Value::as_str).unwrap_or_default() {
                         "files" => {
-                            // the folder picked for an album's Add Photos from Folder… names it
+                            // the folder picked for an album's Add Photos from Folderג€¦ names it
                             // (Java echoes the `album` of the "open" request; Refresh has none)
                             let album = event.get("album").and_then(Value::as_u64);
                             if let Some(files) = event.get("files").and_then(Value::as_array)
@@ -425,7 +517,7 @@ impl eframe::App for App {
             self.inner.ui.before_after = before;
         }
         self.inner.logic(ctx);
-        // an album's Add Photos from Folder…: the system folder picker, the album riding along
+        // an album's Add Photos from Folderג€¦: the system folder picker, the album riding along
         if let Some(album) = self.inner.ui.request_folder_import.take() {
             if self.importing.is_some() {
                 self.inner.toast_error(ctx, "An import is already in progress. Cancel it or wait before adding photos.");

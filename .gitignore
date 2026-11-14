@@ -19,9 +19,16 @@ tools/ai/__pycache__/
 # compiled NPU artifacts (ONNX / QNN contexts) are rebuilt by tools/ai scripts
 tools/ai/onnx/
 # QNN runtime libraries and context binaries staged by android/build.ps1 (Qualcomm licence)
-/android/app/src/ai/assets/qnn/*.bin
-/android/app/src/ai/assets/qnn/*.so
-/android/app/src/ai/jniLibs/
+/android/app/src/sam3/assets/qnn/*.bin
+/android/app/src/sam3/assets/qnn/*.so
+/android/app/src/sam3/jniLibs/
+/android/app/src/mobilesam/assets/qnn/*.bin
+/android/app/src/mobilesam/assets/qnn/*.so
+/android/app/src/mobilesam/jniLibs/
+
+# Qualcomm AI Hub credentials are never committed
+.qai_hub/
+client.ini
 
 # MobileSAM work products (compiled on the device)
 /tools/ai/mobilesam/ctx/
