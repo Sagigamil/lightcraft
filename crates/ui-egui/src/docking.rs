@@ -55,7 +55,7 @@ const PRESETS_WIDTH: f32 = 300.0;
 
 /// The arrangement generation saved as `UiState::docking_version`. Settings without it hold the
 /// side panels in split frames; they start again from [`default_workspace`].
-pub const DOCKING_VERSION: u32 = 1;
+pub const DOCKING_VERSION: u32 = 2;
 
 /// Drops saved settings' arrangement from before [`DOCKING_VERSION`], with the places of its
 /// closed panels, so the app starts from the default workspace; every other setting stays.
@@ -91,6 +91,7 @@ fn column(panel: Panel, width: f32) -> Column<Panel> {
 /// Library in a start dock and Tools in an end dock beside the photo. Presets has a column of
 /// its own on Tools' photo side rather than a group under Tools: both are tall lists that are
 /// read side by side while trying presets, and stacking them would halve both.
+#[cfg(not(target_os = "android"))]
 fn docked(left: f32, right: f32) -> Workspace {
     let start = Node::Dock { side: Side::Start, columns: vec![column(Panel::Library, left)] };
     let end = Node::Dock { side: Side::End, columns: vec![column(Panel::Tools, right), column(Panel::Presets, PRESETS_WIDTH)] };
@@ -100,6 +101,23 @@ fn docked(left: f32, right: f32) -> Workspace {
             SplitSize::FixedFirst(left),
             start,
             split(SplitAxis::Horizontal, SplitSize::FixedSecond(right + PRESETS_WIDTH), tabs(Panel::Canvas), end),
+        )),
+        floating: Vec::new(),
+    })
+}
+
+/// A tablet is too narrow for Tools and Presets side by side: they share one column as tabs.
+#[cfg(target_os = "android")]
+fn docked(left: f32, right: f32) -> Workspace {
+    let start = Node::Dock { side: Side::Start, columns: vec![column(Panel::Library, left)] };
+    let tabbed = Column::new(vec![Group::new(vec![Panel::Tools, Panel::Presets], 0)], right);
+    let end = Node::Dock { side: Side::End, columns: vec![tabbed] };
+    Workspace::new(Layout {
+        root: Some(split(
+            SplitAxis::Horizontal,
+            SplitSize::FixedFirst(left),
+            start,
+            split(SplitAxis::Horizontal, SplitSize::FixedSecond(right), tabs(Panel::Canvas), end),
         )),
         floating: Vec::new(),
     })
@@ -116,10 +134,16 @@ fn home(workspace: &Workspace, panel: Panel) -> Location<Panel> {
     let docked_at =
         |other: Panel| workspace.layout.location(&other).ok().and_then(|location| location.group).and_then(|group| group.column).map(|c| c.side);
     let beside = (panel == Panel::Presets && docked_at(Panel::Tools) == Some(Side::End)).then_some(Panel::Tools);
+    // On a tablet Presets is a tab beside Tools, not a column of its own: a second column would
+    // run off the narrow screen.
+    #[cfg(target_os = "android")]
+    let column_placement = beside.is_none();
+    #[cfg(not(target_os = "android"))]
+    let column_placement = beside.is_some();
     Location {
         floating: None,
         anchor: beside,
-        placement: if beside.is_some() { Placement::Column { after: true } } else { Placement::Tab { before: None } },
+        placement: if column_placement { Placement::Column { after: true } } else { Placement::Tab { before: None } },
         size: None,
         stack: None,
         sibling: Vec::new(),
