@@ -22,3 +22,6 @@ tools/ai/onnx/
 /android/app/src/ai/assets/qnn/*.bin
 /android/app/src/ai/assets/qnn/*.so
 /android/app/src/ai/jniLibs/
+
+# MobileSAM work products (compiled on the device)
+/tools/ai/mobilesam/ctx/
