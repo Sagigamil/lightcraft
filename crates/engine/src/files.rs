@@ -18,11 +18,17 @@ fn meta_of(m: &lightcraft_meta::Metadata) -> (Meta, Option<String>) {
     let camera = [m.make.clone().unwrap_or_default(), m.model.clone().unwrap_or_default()].join(" ").trim().to_string();
     let meta = Meta {
         camera,
+        make: m.make.clone().unwrap_or_default(),
         lens: m.lens_model.clone().unwrap_or_default(),
+        lens_make: m.lens_make.clone().unwrap_or_default(),
         focal_mm: m.focal_length.map(|f| f as f32),
         aperture: m.f_number.map(|f| f as f32),
         shutter,
+        exposure_time: m.exposure_time,
         iso: m.iso,
+        flash: m.flash.map(|f| f.fired),
+        exposure_bias: m.exposure_bias.map(|v| v as f32),
+        serial_number: m.serial_number.clone().unwrap_or_default(),
         location: m.sublocation.clone().unwrap_or_default(),
         city: m.city.clone().unwrap_or_default(),
         state: m.state.clone().unwrap_or_default(),
@@ -39,6 +45,7 @@ fn meta_of(m: &lightcraft_meta::Metadata) -> (Meta, Option<String>) {
         creator: m.artist.clone().unwrap_or_default(),
         keywords: m.keywords.clone(),
         regions: m.regions.clone(),
+        focus: None,
     };
     (meta, m.capture_time.as_ref().map(|d| d.to_iso()))
 }

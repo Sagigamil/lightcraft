@@ -64,6 +64,35 @@ pub struct Region {
     pub description: Option<String>,
 }
 
+/// Where the camera focused, on the upright photo. Stored in the catalog as part of a photo's
+/// metadata; reading files' focus points is done by newer LightCraft builds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FocusPoint {
+    /// The focus frame, normalized to the photo's full, EXIF-oriented frame (y down, 0..1 on both
+    /// axes, clipped to it).
+    pub rect: Rect,
+    /// Focus mode as the camera names it (`AF-C`, `AF-S`, `DMF`…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// The AF area chosen on the camera (`Wide`, `Zone`, `Flexible Spot`…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub area: Option<String>,
+    /// What the camera followed, when it says (`Animal Eye Tracking`, `Face tracking`, `Lock On AF`…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking: Option<String>,
+}
+
+impl FocusPoint {
+    /// The box's centre (normalized, upright).
+    pub fn center(&self) -> (f64, f64) {
+        ((self.rect.x0 + self.rect.x1) / 2.0, (self.rect.y0 + self.rect.y1) / 2.0)
+    }
+    /// The words that describe it, in order (mode, area, tracking), for "AF-C · Wide · Animal Eye Tracking".
+    pub fn words(&self) -> Vec<&str> {
+        [&self.mode, &self.area, &self.tracking].into_iter().filter_map(|s| s.as_deref()).filter(|s| !s.is_empty()).collect()
+    }
+}
+
 /// `mwg-rs:Type`. Unrecognised values are kept verbatim rather than dropped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegionKind {

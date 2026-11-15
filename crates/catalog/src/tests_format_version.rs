@@ -47,6 +47,56 @@ fn v1_library_loads_and_is_upgraded() {
     assert_eq!((r.replayed, r.upgraded_from), (1, None));
 }
 
+/// A library saved before albums could be ordered by hand opens as it was and is rewritten in the current format.
+#[test]
+fn v2_library_loads_and_is_upgraded() {
+    let (base, log, full) = legacy_parts();
+    let m = MemStore::new();
+    m.set(SNAPSHOT, format!("{{\"format\":\"lightcraft-catalog\",\"version\":2,\"seq\":2,\"catalog\":{}}}\n", base.to_snapshot()).into_bytes());
+    m.set(LOG, log.into_bytes());
+    let (_, c, r) = Journal::open(Box::new(m.clone())).unwrap();
+    assert_eq!(c.to_snapshot(), full.to_snapshot());
+    assert_eq!((r.replayed, r.upgraded_from), (1, Some(2)));
+    assert_eq!(snapshot_version(&m), u64::from(VERSION));
+}
+
+/// A library saved before keywords could be listed on their own opens as it was and is rewritten
+/// in the current format.
+#[test]
+fn v3_library_loads_and_is_upgraded() {
+    let (base, log, full) = legacy_parts();
+    let m = MemStore::new();
+    m.set(SNAPSHOT, format!("{{\"format\":\"lightcraft-catalog\",\"version\":3,\"seq\":2,\"catalog\":{}}}\n", base.to_snapshot()).into_bytes());
+    m.set(LOG, log.into_bytes());
+    let (_, c, r) = Journal::open(Box::new(m.clone())).unwrap();
+    assert_eq!(c.to_snapshot(), full.to_snapshot());
+    assert_eq!((r.replayed, r.upgraded_from), (1, Some(3)));
+    assert_eq!(snapshot_version(&m), u64::from(VERSION));
+}
+
+/// A v6 library (before preview-only photos recorded which version decided it, #662) opens with
+/// an empty stamp on its preview-only photos, so they are rechecked once, and is rewritten in the
+/// current format.
+#[test]
+fn v6_preview_only_photo_loads_unstamped_and_is_upgraded() {
+    let mut c = Catalog::new();
+    let id = c.alloc_photo_id();
+    let mut p = Photo::new(id, Source::File { path: "/p/a.cr3".into() }, "a.cr3", "CR3", 160, 120, "2026-01-01");
+    p.kind = MediaKind::Raw;
+    p.preview_only = Some("Cr3 files are not decoded yet".into());
+    c.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+    let snap = c.to_snapshot();
+    assert!(!snap.contains("preview_checked"), "an empty stamp isn't written");
+    let m = MemStore::new();
+    m.set(SNAPSHOT, format!("{{\"format\":\"lightcraft-catalog\",\"version\":6,\"seq\":1,\"catalog\":{snap}}}\n").into_bytes());
+    let (_, loaded, r) = Journal::open(Box::new(m.clone())).unwrap();
+    let p = loaded.photo(id).unwrap();
+    assert_eq!(p.preview_only.as_deref(), Some("Cr3 files are not decoded yet"));
+    assert_eq!(p.preview_checked, "");
+    assert_eq!(r.upgraded_from, Some(6));
+    assert_eq!(snapshot_version(&m), u64::from(VERSION));
+}
+
 #[test]
 fn versionless_log_only_library_is_upgraded() {
     let mut c = Catalog::new();
@@ -144,7 +194,8 @@ fn bad_crc_is_still_a_torn_tail() {
 
 /// Guard for the version rule (see `journal` → *Format versions*): adding an [`Op`] variant breaks
 /// this match. When it does, bump `journal::VERSION`, add a row to the format table, and add the
-/// variant here under the new version.
+/// variant here under the new version. A version that only adds serialized fields raises
+/// `NEWEST_FIELDS` instead.
 #[test]
 fn op_variants_are_versioned() {
     fn since(op: &Op) -> u32 {
@@ -179,8 +230,90 @@ fn op_variants_are_versioned() {
             | Op::SetLabelName { .. }
             | Op::Batch { .. } => 1,
             Op::SetBrowsed { .. } => 2,
+            Op::SetAlbumOrder { .. } => 3,
+            Op::SetEmbeddedLens { .. } => 4,
+            Op::SetKeyword { .. } => 5,
+            Op::SetFolderRecord { .. } => 6,
+            Op::SetAsShotWb { .. } => 7,
+            Op::SetHistoryCursor { .. } => 8,
         }
     }
-    let newest = since(&Op::SetBrowsed { folder: String::new(), at: None });
-    assert_eq!(newest, VERSION, "the newest op's version must be the current format version");
+    /// v13: Lens Blur in develop settings and mask adjustments (v12: `Catalog.grids` and `SegMask.grid`; v11: `EmbeddedLens.source`;
+    /// v10: `Mask.on_photo`; v9: `Photo.preview_checked` and `Op::SetContent.preview_checked`).
+    const NEWEST_FIELDS: u32 = 13;
+    let newest = since(&Op::SetHistoryCursor { id: PhotoId(1), cursor: None });
+    assert_eq!(newest.max(NEWEST_FIELDS), VERSION, "the newest op's or fields' version must be the current format version");
+}
+
+/// Every field the v2 build did not know (format 3-13) survives a snapshot: album order, the
+/// keyword list, folder records, the History cursor, the As Shot stamp, the preview stamp, embedded
+/// lens data, the WB scale, masks on the photo with Lens Blur, shared segmentation grids and Lens
+/// Blur settings. Written in v13, read back equal.
+#[test]
+fn a_v13_library_keeps_every_format_field() {
+    use crate::folders::FolderRecord;
+    let mut c = Catalog::new();
+    let op = photo(&mut c);
+    c.apply(op).unwrap();
+    let id = c.photos().next().unwrap().id;
+    let aid = c.alloc_album_id();
+    c.apply(Op::AddAlbum { album: Album::new(aid, "Trip") }).unwrap();
+    c.apply(Op::SetAlbumOrder { id: aid, order: Some(4) }).unwrap();
+    let info: crate::keywords::KeywordInfo = serde_json::from_value(serde_json::json!({"synonyms": ["italia"]})).unwrap();
+    c.apply(Op::SetKeyword { path: "travel|italy".into(), info: Some(info) }).unwrap();
+    c.apply(Op::SetFolderRecord { folder: "/p".into(), record: Some(FolderRecord { label: Some(ColorLabel::Red) }) }).unwrap();
+    c.apply(Op::SetHistoryCursor { id, cursor: Some(0) }).unwrap();
+    c.apply(Op::SetAsShotWb { id, wb: Some((5000.0, 3.0)) }).unwrap();
+    c.apply(Op::SetEmbeddedLens {
+        id,
+        lens: Some(Box::new(lightcraft_develop::EmbeddedLens { source: lightcraft_develop::LensSource::Database, ..Default::default() })),
+    })
+    .unwrap();
+    let mut d = DevelopSettings::for_raw(5000.0, 3.0);
+    d.wb.scale = lightcraft_develop::WbScale::Kelvin;
+    d.lens_blur.enabled = true;
+    d.lens_blur.amount = 40.0;
+    d.lens_blur.transition = 70.0;
+    d.masks.push(lightcraft_develop::Mask {
+        id: 1,
+        on_photo: false,
+        adjust: lightcraft_develop::LocalAdjustments { lens_blur: 20.0, ..Default::default() },
+        components: vec![lightcraft_develop::MaskComponent {
+            name: None,
+            op: Default::default(),
+            invert: false,
+            shape: lightcraft_develop::MaskShape::Object {
+                hint: Vec::new(),
+                exclude: Vec::new(),
+                seg: Some(lightcraft_develop::SegMask::from_logits(4, &[1.0; 16])),
+                detail: Vec::new(),
+                edge: 0.0,
+            },
+        }],
+        ..Default::default()
+    });
+    c.apply(Op::SetDevelop { id, settings: Arc::new(d), label: "Lens Blur".into(), edited: None }).unwrap();
+    c.apply(Op::SetContent {
+        id,
+        width: 4,
+        height: 3,
+        file_size: 10,
+        content_hash: None,
+        preview_only: Some("preview".into()),
+        preview_checked: "9.9.9".into(),
+    })
+    .unwrap();
+
+    let m = MemStore::new();
+    let (mut j, _, _) = Journal::open(Box::new(m.clone())).unwrap();
+    j.snapshot(&c).unwrap();
+    drop(j);
+    assert_eq!(snapshot_version(&m), u64::from(VERSION));
+    // the shared grid table holds the one grid once, and no mask repeats it inline
+    let snap: serde_json::Value = serde_json::from_slice(&m.get(SNAPSHOT).unwrap()).unwrap();
+    assert_eq!(snap["catalog"]["grids"].as_array().map(Vec::len), Some(1));
+
+    let (_, back, r) = Journal::open(Box::new(m)).unwrap();
+    assert_eq!(r.upgraded_from, None);
+    assert_eq!(back.to_snapshot(), c.to_snapshot(), "every v13 field round-trips");
 }

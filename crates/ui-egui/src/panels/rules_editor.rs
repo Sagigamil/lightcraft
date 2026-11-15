@@ -17,7 +17,7 @@ pub fn default_value(field: &str, op: &str) -> Value {
         (Some(Kind::Date), "between") => json!(["", ""]),
         (Some(Kind::Number), "between") => json!([0, 0]),
         (Some(Kind::Number), _) => json!(if field == "rating" { 3 } else { 0 }),
-        (Some(Kind::Choice(c)), _) => json!(c.first().copied().unwrap_or("")),
+        (Some(Kind::Choice(c)), _) => json!(c.first().map(|(v, _)| *v).unwrap_or("")),
         (Some(Kind::Bool), _) => json!(true),
         _ => json!(""),
     }
@@ -110,9 +110,9 @@ fn value_editor(ui: &mut egui::Ui, field: &str, op: &str, v: &mut Value, salt: &
         (Some(Kind::Choice(c)), _) => {
             let cur = v.as_str().unwrap_or("").to_string();
             egui::ComboBox::from_id_salt(format!("{salt}-choice")).width(90.0).selected_text(crate::i18n::tr(&cur)).show_ui(ui, |ui| {
-                for x in c.iter() {
-                    if ui.selectable_label(cur == *x, crate::i18n::tr(x)).clicked() {
-                        *v = json!(x);
+                for (value, label) in c.iter() {
+                    if ui.selectable_label(cur == *value, crate::i18n::tr(label)).clicked() {
+                        *v = json!(value);
                     }
                 }
             });

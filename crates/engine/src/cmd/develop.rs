@@ -198,7 +198,12 @@ pub fn specs() -> Vec<CommandSpec> {
                         None => {
                             let info = s.source_info(id);
                             DevelopSettings {
-                                wb: lightcraft_develop::WhiteBalance { mode: WbMode::AsShot, temp: info.as_shot_temp, tint: info.as_shot_tint },
+                                wb: lightcraft_develop::WhiteBalance {
+                                    mode: WbMode::AsShot,
+                                    temp: info.as_shot_temp,
+                                    tint: info.as_shot_tint,
+                                    ..Default::default()
+                                },
                                 ..Default::default()
                             }
                         }

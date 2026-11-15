@@ -69,7 +69,9 @@ fn threshold_compaction_runs_in_the_background() {
             background += 1;
         }
         if k == 30 {
-            // a crash while a compaction may be in flight
+            // a crash while a compaction may be in flight (the log is written on its own thread
+            // natively; flush it first, as a crash after the appends were acknowledged has it)
+            s.library.as_mut().unwrap().journal_mut().flush().unwrap();
             let expect = s.catalog.to_snapshot();
             let copy = temp_dir("bg-compact-crash");
             std::fs::create_dir_all(&copy).unwrap();

@@ -943,6 +943,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2839,15 +2848,20 @@ dependencies = [
 name = "lightcraft-catalog"
 version = "0.4.0"
 dependencies = [
+ "chrono",
  "crc32fast",
+ "dhat",
  "lightcraft-develop",
+ "lightcraft-geom",
  "lightcraft-meta",
+ "lightcraft-raw",
  "log",
  "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "web-time",
+ "winapi-util",
 ]
 
 [[package]]
