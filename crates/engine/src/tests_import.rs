@@ -864,6 +864,38 @@ fn missing_photos_skip_local_browse_records() {
     assert_eq!(s.visible_cloned().len(), 4, "the view lists what the count counts");
 }
 
+/// Android originals are `content://` documents, not file-system paths: Missing Photos must ask
+/// the session's availability probe (the ContentResolver on Android), or `Path::exists` would
+/// report every imported photo missing while the view — which uses the probe — shows none.
+#[test]
+fn missing_photos_use_the_session_probe_for_android_documents() {
+    use lightcraft_catalog::{Op, Photo, PhotoId, Source};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut s = Session::new();
+    let ops: Vec<Op> = (0..5u64)
+        .map(|i| {
+            let path = format!("content://com.android.externalstorage.documents/tree/1%3ADCIM/document/1%3ADCIM%2FIMG_{i:04}.jpg");
+            let p = Photo::new(PhotoId(i + 1), Source::File { path }, &format!("IMG_{i:04}.jpg"), "JPEG", 60, 40, "2026-01-01T00:00:00");
+            Op::AddPhoto { photo: Box::new(p) }
+        })
+        .collect();
+    s.commit("Add", Op::Batch { ops }).unwrap();
+    let present = Arc::new(AtomicBool::new(true));
+    let p = present.clone();
+    s.media.availability.set_probe(Arc::new(move |_| p.load(Ordering::SeqCst)));
+    assert!(crate::cmd::missing::missing(&s).is_empty(), "the provider has every document");
+    assert_eq!(s.execute("library.missing", &json!({})).unwrap().as_array().map(Vec::len), Some(0));
+    s.execute("library.source", &json!({"kind": "missing"})).unwrap();
+    assert!(s.visible_cloned().is_empty(), "the count and the view agree");
+
+    present.store(false, Ordering::SeqCst);
+    assert_eq!(crate::cmd::missing::missing(&s).len(), 5, "a revoked or deleted document is missing");
+    assert_eq!(s.execute("library.missing", &json!({})).unwrap().as_array().map(Vec::len), Some(5));
+    s.catalog.revision += 1;
+    assert_eq!(s.visible_cloned().len(), 5);
+}
+
 /// Import a file that is in Recently Deleted (issue #298): by default it is skipped but the
 /// report says it is in the trash; `onDeleted: restore` brings it back with its edits;
 /// `onDeleted: fresh` replaces the trashed record with a new one.

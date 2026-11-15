@@ -36,12 +36,15 @@ pub fn missing_with(cat: &Catalog, mut exists: impl FnMut(&str) -> bool) -> Vec<
     cat.photos().filter_map(|p| checked_path(p).filter(|f| !exists(f)).map(|f| (p.id, f.to_string()))).collect()
 }
 
-/// Library photos whose original file can't be found: (id, path).
+/// Library photos whose original file can't be found: (id, path). Uses the session's availability
+/// probe, so an `android` library's `content://` documents are checked through the ContentResolver
+/// (a raw `Path::exists` says every one of them is gone), and a test's injected probe is honoured.
 pub fn missing(s: &Session) -> Vec<(PhotoId, String)> {
     if cfg!(target_arch = "wasm32") {
         return Vec::new();
     }
-    missing_with(&s.catalog, |f| Path::new(f).exists())
+    let exists = s.media.availability.probe();
+    missing_with(&s.catalog, |f| exists(f))
 }
 
 /// Whether photo `id` is in scope and its file is gone (the Missing Photos view checks only

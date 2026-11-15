@@ -278,14 +278,17 @@ fn missing_count(app: &mut LightcraftApp, ui: &mut egui::Ui) -> usize {
     let mut job: Job = ui.data(|d| d.get_temp(id)).unwrap_or(Job { rev: u64::MAX, at: f64::MIN, ..Default::default() });
     let fresh = now - job.at < 5.0 && job.rev == rev;
     if !fresh && !job.running.load(Relaxed) {
-        // the same scope as the Missing Photos view: library photos only, never Local browse records
+        // the same scope and the same existence check as the Missing Photos view: library photos
+        // only, never Local browse records, and Android `content://` documents through the
+        // ContentResolver (a raw `Path::exists` would call every one of them missing)
         let paths = lightcraft_engine::cmd::missing::candidates(&app.session.catalog);
+        let exists = app.session.media.availability.probe();
         job.running.store(true, Relaxed);
         job.at = now;
         job.rev = rev;
         let (n, running, ctx) = (job.n.clone(), job.running.clone(), ui.ctx().clone());
         let work = move || {
-            let missing = if cfg!(target_arch = "wasm32") { 0 } else { paths.iter().filter(|p| !std::path::Path::new(p).exists()).count() };
+            let missing = if cfg!(target_arch = "wasm32") { 0 } else { paths.iter().filter(|p| !exists(p)).count() };
             n.store(missing, Relaxed);
             running.store(false, Relaxed);
             ctx.request_repaint();
